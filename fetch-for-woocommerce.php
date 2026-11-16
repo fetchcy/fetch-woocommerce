@@ -23,6 +23,7 @@ define( 'FETCH_WC_DIR', plugin_dir_path( __FILE__ ) );
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-settings.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-logger.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-api.php';
+require_once FETCH_WC_DIR . 'includes/class-fetch-wc-language.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-product-mapper.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-product-sync.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-mirror.php';

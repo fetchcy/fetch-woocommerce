@@ -61,7 +61,7 @@ class Fetch_WC_Product_Sync {
 		}
 	}
 
-	/** Queue a product (a variation queues its parent). */
+	/** Queue a product (a variation queues its parent). Translations are skipped. */
 	public static function queue( $id ) {
 		$post_type = get_post_type( $id );
 		if ( 'product_variation' === $post_type ) {
@@ -69,7 +69,7 @@ class Fetch_WC_Product_Sync {
 		} elseif ( 'product' !== $post_type ) {
 			return;
 		}
-		if ( ! $id ) {
+		if ( ! $id || ! Fetch_WC_Language::is_default( $id ) ) {
 			return;
 		}
 		$pending        = self::pending( self::PENDING_OPTION );
@@ -84,10 +84,15 @@ class Fetch_WC_Product_Sync {
 	 * The variations of a product being deleted are skipped: the parent already
 	 * queued their rows, and WooCommerce deletes them after the parent's meta is
 	 * gone, when their names can no longer be built.
+	 * A translation was never synced: deleting it must not switch off the
+	 * original, which may share its SKU (or carry its copied meta).
 	 */
 	public static function queue_deletion( $id ) {
 		$post_type = get_post_type( $id );
 		if ( 'product' !== $post_type && 'product_variation' !== $post_type ) {
+			return;
+		}
+		if ( ! Fetch_WC_Language::is_default( $id ) ) {
 			return;
 		}
 		$product = wc_get_product( $id );
@@ -166,7 +171,7 @@ class Fetch_WC_Product_Sync {
 
 	public static function bulk_page( $page ) {
 		$page = max( 1, (int) $page );
-		$ids  = wc_get_products(
+		$ids  = Fetch_WC_Language::product_ids(
 			array(
 				'type'    => array( 'simple', 'variable' ),
 				'status'  => array( 'publish', 'private', 'draft' ),
@@ -198,6 +203,9 @@ class Fetch_WC_Product_Sync {
 		$items    = array();
 		$products = array();
 		foreach ( $ids as $id ) {
+			if ( ! Fetch_WC_Language::is_default( $id ) ) {
+				continue; // A translation: the default-language product is the one on Fetch.
+			}
 			$product = wc_get_product( $id );
 			if ( ! Fetch_WC_Product_Mapper::supports( $product ) ) {
 				continue;

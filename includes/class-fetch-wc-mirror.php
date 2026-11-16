@@ -98,6 +98,7 @@ class Fetch_WC_Mirror {
 
 	/**
 	 * Refs this shop sells on Fetch: every row a full sync sends as active.
+	 * Translations are not synced, so their listings are not kept either.
 	 *
 	 * @return array<string,true>
 	 */
@@ -105,7 +106,7 @@ class Fetch_WC_Mirror {
 		$keep = array();
 		$page = 1;
 		do {
-			$ids = wc_get_products(
+			$ids = Fetch_WC_Language::product_ids(
 				array(
 					'type'    => array( 'simple', 'variable' ),
 					'status'  => array( 'publish' ),
@@ -117,6 +118,9 @@ class Fetch_WC_Mirror {
 				)
 			);
 			foreach ( $ids as $id ) {
+				if ( ! Fetch_WC_Language::is_default( $id ) ) {
+					continue;
+				}
 				foreach ( Fetch_WC_Product_Mapper::active_refs( wc_get_product( $id ) ) as $ref ) {
 					$keep[ $ref ] = true;
 				}
