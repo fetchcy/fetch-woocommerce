@@ -16,6 +16,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // back to itself; fetch drops cookies, so without it every call loops.
 const wpFetch = (url, opts = {}) => fetch(url, { ...opts, redirect: 'manual', signal: AbortSignal.timeout(120000), headers: { ...(opts.headers || {}), cookie: 'playground_auto_login_already_happened=1' } });
 const mockLog = () => JSON.parse(fs.readFileSync(path.join(here, 'mock-requests.json'), 'utf8'));
+const productPuts = () => mockLog().requests.filter((r) => r.method === 'PUT' && r.path.endsWith('/products'));
+const setStatus = (orderId, status) => fetch(`${MOCK}/__set-status`, { method: 'POST', body: JSON.stringify({ orderId, status }) });
+const seedOrder = (o) => fetch(`${MOCK}/__seed-order`, { method: 'POST', body: JSON.stringify(o) });
+function postWebhook(event, eventId, data) {
+  const raw = JSON.stringify({ event, eventId, sentAt: new Date().toISOString(), data });
+  const ts = Math.floor(Date.now() / 1000);
+  const v1 = crypto.createHmac('sha256', 'whsec_test').update(`${ts}.${raw}`).digest('hex');
+  return wpFetch(`${WP}/wp-json/fetch/v1/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-Fetch-Signature': `t=${ts},v1=${v1}` }, body: raw });
+}
 
 const REUSE = !!process.env.E2E_REUSE; // reuse an already-running mock + Playground
 const mock = REUSE ? null : spawn('node', [path.join(here, 'mock-fetch.mjs')], { stdio: 'inherit' });
@@ -27,9 +36,9 @@ const cleanup = () => { try { pg?.kill('SIGTERM'); } catch {} try { mock?.kill()
 process.on('exit', cleanup);
 setTimeout(() => { console.log('E2E HARD TIMEOUT'); for (const r of results) console.log(r.join(' ')); cleanup(); process.exit(3); }, 12 * 60 * 1000).unref();
 
-async function step(name, retry = true) {
-  const r = await wpFetch(`${WP}/e2e/e2e-driver.php?step=${name}`);
-  if (r.status >= 500 && retry && name === 'configure') { await sleep(3000); return step(name, false); }
+async function step(name, params = {}, retry = true) {
+  const r = await wpFetch(`${WP}/e2e/e2e-driver.php?${new URLSearchParams({ step: name, ...params })}`);
+  if (r.status >= 500 && retry && name === 'configure') { await sleep(3000); return step(name, params, false); }
   const t = await r.text();
   try { return JSON.parse(t); } catch { throw new Error(`step ${name} returned non-JSON (${r.status}): ${t.slice(t.indexOf('<body') > -1 ? t.indexOf('<body') : 0).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 1500)}`); }
 }
@@ -144,6 +153,81 @@ try {
   ok('badly signed webhook → 401', bad.status === 401, bad.status);
   const unsigned = await wpFetch(`${WP}/wp-json/fetch/v1/webhook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
   ok('unsigned webhook → 401', unsigned.status === 401, unsigned.status);
+
+  // --- 1.1.1: live batch limits ------------------------------------------------------
+  const beforeBig = productPuts().length;
+  const big = await step('many_variations');
+  const bigPuts = productPuts().slice(beforeBig).filter((r) => r.body.products.some((x) => /^Big Pack/.test(x.name)));
+  const bigRows = bigPuts.flatMap((r) => r.body.products).filter((x) => /^Big Pack/.test(x.name));
+  ok('210 variation rows sent in several PUTs of at most 200', bigPuts.length >= 2 && bigPuts.every((r) => r.body.products.length <= 200) && new Set(bigRows.map((x) => x.ref)).size === 210, bigPuts.map((r) => r.body.products.length));
+  ok('every variation recorded as synced, nothing left queued', big.variations_synced === 210 && big.pending_after?.length === 0, big);
+  ok('batched payloads pass the live rules (≤200 rows, ≤500 KB, price on every row)', mockLog().problems.length === 0, mockLog().problems);
+
+  // --- 1.1.1: deleting / trashing sends a full inactive row --------------------------
+  const beforeDel = productPuts().length;
+  const del = await step('delete_products');
+  const delRows = productPuts().slice(beforeDel).flatMap((r) => r.body.products);
+  const lastRow = (ref) => delRows.filter((x) => x.ref === ref).at(-1);
+  const firstRow = (ref) => delRows.find((x) => x.ref === ref);
+  const lamp = lastRow('LAMP-1');
+  ok('permanently deleted product → full inactive row (price, stock, name)', del.synced === true && lamp?.isActive === false && lamp.price === firstRow('LAMP-1')?.price && lamp.stockCount === 3 && lamp.name === 'Desk Lamp' && lamp.productType === 'SIMPLE', { del, lamp });
+  const cb = lastRow('CASE-BLACK');
+  const cw = lastRow('CASE-WHITE');
+  ok('variable product deleted via the WooCommerce API → each variation switched off as a full row, once', cb?.isActive === false && cb.price === '13.20' && cb.name === 'Phone Case – Black' && cw?.isActive === false && cw.price === '13.20' && cw.name === 'Phone Case – White' && delRows.filter((x) => x.ref === 'CASE-BLACK').length === 1, { cb, cw, queued: del.deactivations_queued });
+  const lone = lastRow(del.variation_ref);
+  ok('a single variation deleted on its own → its full row, switched off', !!del.variation_ref && lone?.isActive === false && lone.name === 'Big Pack – 1' && lone.price === '3.30', { ref: del.variation_ref, lone });
+  const mug = lastRow('MUG-1');
+  ok('trashed product → full inactive row', mug?.isActive === false && mug.price === firstRow('MUG-1')?.price && mug.stockCount === 3, mug);
+  ok('deactivation queue emptied after a successful send', del.deactivations_after === 0, del);
+  ok('deactivation rows pass the live rules (price on every row)', mockLog().problems.length === 0, mockLog().problems);
+
+  // Fetch is the source of truth for the orders seeded above; keep the mock in step.
+  await setStatus('ord-1', 'CANCELLED');
+
+  // --- 1.1.1: status changes follow Fetch --------------------------------------------
+  const ord2 = { ...order, orderId: 'ord-2', orderNumber: '238401', items: [order.items[1]], subtotal: '5.00', total: '7.45' };
+  let r = await postWebhook('order.status_changed', 'evt_status_2', { ...ord2, status: 'ACCEPTED', previousStatus: 'DRAFT' });
+  let o2 = await step('order_info', { order: 'ord-2' });
+  ok('order.status_changed webhook moves the WooCommerce order (DRAFT → ACCEPTED = processing)', r.status === 200 && o2.order?.status === 'processing' && o2.order.fetch_status === 'ACCEPTED' && o2.count === 1, { http: r.status, o2 });
+  await setStatus('ord-2', 'DELIVERED');
+  await step('poll_only');
+  o2 = await step('order_info', { order: 'ord-2' });
+  ok('2-minute poll picks up a later status (DELIVERED = completed)', o2.order?.status === 'completed' && o2.order.fetch_status === 'DELIVERED' && o2.count === 1, o2);
+
+  // --- 1.1.1: masked customer details filled in later ---------------------------------
+  const maskedCustomer = { name: '******', phone: '******', address: { line1: '******', city: '******', postalCode: '******', notes: '******' } };
+  const ord3 = { ...order, orderId: 'ord-3', orderNumber: '238402', items: [order.items[1]], subtotal: '5.00', total: '7.45', customer: maskedCustomer };
+  await seedOrder(ord3);
+  await step('poll_only');
+  let o3 = await step('order_info', { order: 'ord-3' });
+  ok('order first seen masked is imported without "******" and flagged', o3.order?.has_mask === false && o3.order.name === 'Fetch customer' && o3.order.masked === '1' && o3.order.phone === '', o3);
+  await seedOrder({ ...ord3, status: 'ACCEPTED', customer: order.customer });
+  await step('poll_only');
+  o3 = await step('order_info', { order: 'ord-3' });
+  ok('a later unmasked copy fills in name, phone, address and note', o3.order?.name === 'Maria Georgiou' && o3.order.phone === '+35799123456' && o3.order.address === 'Makariou 12 Flat 3 / Nicosia / 1065' && o3.order.shipping === 'Makariou 12 Flat 3' && o3.order.note === 'Ring twice' && o3.order.masked === '' && o3.order.status === 'processing' && o3.order.notes.some((n) => /Customer details completed/.test(n)), o3);
+  r = await postWebhook('order.status_changed', 'evt_status_3', { ...ord3, status: 'DELIVERED', previousStatus: 'ACCEPTED' });
+  o3 = await step('order_info', { order: 'ord-3' });
+  ok('masked data never overwrites real details (status still follows)', r.status === 200 && o3.order?.name === 'Maria Georgiou' && o3.order.address.startsWith('Makariou 12') && o3.order.has_mask === false && o3.order.status === 'completed' && o3.count === 1, o3);
+  await setStatus('ord-3', 'DELIVERED');
+
+  // --- 1.1.1: webhook + poll for the same order → one WooCommerce order ----------------
+  const ord4 = { ...order, orderId: 'ord-4', orderNumber: '238403', items: [order.items[1]], subtotal: '5.00', total: '7.45' };
+  await seedOrder(ord4);
+  const held = await step('hold_lock', { order: 'ord-4' });
+  const t0 = Date.now();
+  r = await postWebhook('order.created', 'evt_created_4', ord4);
+  const waited = Date.now() - t0;
+  await step('poll_only');
+  let o4 = await step('order_info', { order: 'ord-4' });
+  ok('while another request imports the order, webhook waits then answers 503 and poll skips it', held.held === true && r.status === 503 && waited >= 4000 && o4.count === 0, { held, http: r.status, waited, count: o4.count });
+  await step('release_lock', { order: 'ord-4' });
+  const [retry] = await Promise.all([postWebhook('order.created', 'evt_created_4', ord4), step('poll_only'), postWebhook('order.created', 'evt_created_4b', ord4)]);
+  o4 = await step('order_info', { order: 'ord-4' });
+  ok('webhook retry + poll + second delivery at once → exactly one WooCommerce order', retry.status === 200 && o4.count === 1 && o4.order?.fetch_status === 'DRAFT', { http: retry.status, o4 });
+  await step('poll_only');
+  r = await postWebhook('order.created', 'evt_created_4c', ord4);
+  o4 = await step('order_info', { order: 'ord-4' });
+  ok('a new eventId for an order already imported is deduped by Fetch orderId', r.status === 200 && o4.count === 1, o4.count);
 
   const srv = await step('server');
   ok('server select offers Production, Staging, Custom URL', JSON.stringify(srv.options) === '["production","staging","custom"]' && srv.help === true, srv);

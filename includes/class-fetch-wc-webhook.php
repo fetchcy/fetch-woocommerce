@@ -15,6 +15,8 @@ class Fetch_WC_Webhook {
 	const ROUTE           = '/webhook';
 	const TOLERANCE       = 300;
 	const SEEN_OPTION     = 'fetch_wc_seen_events';
+	/** Seconds a delivery waits for a poll that is importing the same order. */
+	const LOCK_WAIT       = 5;
 
 	public static function init() {
 		add_action( 'rest_api_init', array( __CLASS__, 'register_route' ) );
@@ -55,7 +57,12 @@ class Fetch_WC_Webhook {
 		}
 
 		if ( 0 === strpos( (string) $payload['event'], 'order.' ) && Fetch_WC_Settings::enabled( 'import_orders' ) ) {
-			Fetch_WC_Order_Sync::import( $payload['data'] );
+			// order.created, order.status_changed and order.cancelled all carry the
+			// full order; import() creates it or brings status and customer up to date.
+			if ( false === Fetch_WC_Order_Sync::import( $payload['data'], self::LOCK_WAIT ) ) {
+				// The poll or another delivery is on this order: not remembered, so Fetch's retry is processed.
+				return new WP_REST_Response( array( 'error' => 'busy, retry' ), 503 );
+			}
 		}
 		if ( '' !== $event_id ) {
 			self::remember( $event_id );

@@ -239,6 +239,102 @@ switch ( $step ) {
 		Fetch_WC_Product_Sync::flush();
 		break;
 
+	case 'many_variations':
+		// One variable product with 210 variations = 210 Fetch rows: more than one PUT may carry.
+		$attr = new WC_Product_Attribute();
+		$attr->set_name( 'Size' );
+		$attr->set_options( array_map( 'strval', range( 1, 210 ) ) );
+		$attr->set_visible( true );
+		$attr->set_variation( true );
+		$big = new WC_Product_Variable();
+		$big->set_name( 'Big Pack' );
+		$big->set_sku( 'BIG' );
+		$big->set_attributes( array( $attr ) );
+		$big->set_status( 'publish' );
+		$big_id = $big->save();
+		foreach ( range( 1, 210 ) as $size ) {
+			$v = new WC_Product_Variation();
+			$v->set_parent_id( $big_id );
+			$v->set_attributes( array( 'size' => (string) $size ) );
+			$v->set_regular_price( '3' );
+			$v->set_status( 'publish' );
+			$v->save();
+		}
+		$out['pending'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		Fetch_WC_Product_Sync::flush();
+		$out['big_id']        = $big_id;
+		$out['pending_after'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		$synced               = 0;
+		foreach ( wc_get_product( $big_id )->get_children() as $child ) {
+			$synced += get_post_meta( $child, '_fetch_product_id', true ) ? 1 : 0;
+		}
+		$out['variations_synced'] = $synced;
+		break;
+
+	case 'delete_products':
+		$make = static function ( $name, $sku, $price ) {
+			$p = new WC_Product_Simple();
+			$p->set_name( $name );
+			$p->set_sku( $sku );
+			$p->set_regular_price( $price );
+			$p->set_manage_stock( true );
+			$p->set_stock_quantity( 3 );
+			$p->set_status( 'publish' );
+			return $p->save();
+		};
+		$lamp = $make( 'Desk Lamp', 'LAMP-1', '22' );
+		$mug  = $make( 'Mug', 'MUG-1', '6' );
+		Fetch_WC_Product_Sync::flush();
+		$out['synced'] = (bool) get_post_meta( $lamp, '_fetch_product_id', true ) && (bool) get_post_meta( $mug, '_fetch_product_id', true );
+		wp_delete_post( $lamp, true ); // wp-admin "Delete permanently"
+		$big_children        = wc_get_product( wc_get_product_id_by_sku( 'BIG' ) )->get_children();
+		$out['variation_ref'] = get_post_meta( $big_children[0], '_fetch_ref', true );
+		wp_delete_post( $big_children[0], true ); // one variation on its own
+		wc_get_product( wc_get_product_id_by_sku( 'CASE' ) )->delete( true ); // WooCommerce API, variable product
+		wp_trash_post( $mug );
+		$out['deactivations_queued'] = array_keys( get_option( Fetch_WC_Product_Sync::DEACTIVATE_OPTION, array() ) );
+		Fetch_WC_Product_Sync::flush();
+		$out['deactivations_after'] = count( get_option( Fetch_WC_Product_Sync::DEACTIVATE_OPTION, array() ) );
+		break;
+
+	case 'poll_only':
+		Fetch_WC_Order_Sync::poll();
+		break;
+
+	case 'order_info':
+		$fetch_id = isset( $_GET['order'] ) ? (string) $_GET['order'] : '';
+		$order    = Fetch_WC_Order_Sync::find( $fetch_id );
+		$out['count'] = count( wc_get_orders( array( 'limit' => -1, 'meta_key' => '_fetch_order_id', 'meta_value' => $fetch_id ) ) );
+		if ( $order ) {
+			$order = wc_get_order( $order->get_id() );
+			$out['order'] = array(
+				'status'       => $order->get_status(),
+				'fetch_status' => $order->get_meta( '_fetch_status' ),
+				'masked'       => $order->get_meta( '_fetch_customer_masked' ),
+				'name'         => $order->get_formatted_billing_full_name(),
+				'phone'        => $order->get_billing_phone(),
+				'address'      => $order->get_billing_address_1() . ' / ' . $order->get_billing_city() . ' / ' . $order->get_billing_postcode(),
+				'shipping'     => $order->get_shipping_address_1(),
+				'note'         => $order->get_customer_note(),
+				'has_mask'     => false !== strpos( wp_json_encode( array( $order->get_address( 'billing' ), $order->get_address( 'shipping' ), $order->get_customer_note() ) ), '******' ),
+				'notes'        => array_map( function ( $n ) { return $n->content; }, wc_get_order_notes( array( 'order_id' => $order->get_id() ) ) ),
+			);
+		}
+		break;
+
+	case 'hold_lock':
+		// Stand in for a request that is importing this order right now.
+		$token = Fetch_WC_Order_Sync::lock( (string) $_GET['order'] );
+		update_option( 'e2e_lock_token', $token, false );
+		$out['held'] = is_string( $token );
+		break;
+
+	case 'release_lock':
+		Fetch_WC_Order_Sync::unlock( (string) $_GET['order'], get_option( 'e2e_lock_token' ) );
+		delete_option( 'e2e_lock_token' );
+		$out['released'] = true;
+		break;
+
 	case 'render_box':
 		$order = Fetch_WC_Order_Sync::find( 'ord-1' );
 		ob_start();

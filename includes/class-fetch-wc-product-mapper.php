@@ -46,9 +46,11 @@ class Fetch_WC_Product_Mapper {
 	 * (the variation SKU), "Parent – Black / M" as the name, its own price,
 	 * stock and image, and the parent's description, brand, category and tags.
 	 *
+	 * $force_inactive builds the same full rows switched off, for a deletion.
+	 *
 	 * @return array<int,array{0:array<string,mixed>,1:WC_Product}>
 	 */
-	public static function to_fetch_items( WC_Product $product ) {
+	public static function to_fetch_items( WC_Product $product, $force_inactive = false ) {
 		if ( ! self::supports( $product ) ) {
 			return array();
 		}
@@ -60,7 +62,7 @@ class Fetch_WC_Product_Mapper {
 					'ref'         => self::ref( $product ),
 					'name'        => wp_strip_all_tags( $product->get_name() ),
 					'productType' => 'SIMPLE',
-					'isActive'    => self::is_active( $product ),
+					'isActive'    => ! $force_inactive && self::is_active( $product ),
 				),
 				$base,
 				self::price_and_stock( $product )
@@ -76,7 +78,7 @@ class Fetch_WC_Product_Mapper {
 			return array( array( $item, $product ) );
 		}
 
-		$parent_active = self::is_active( $product );
+		$parent_active = ! $force_inactive && self::is_active( $product );
 		$parent_images = self::images( $product );
 		$out           = array();
 		foreach ( $product->get_children() as $child_id ) {
@@ -108,17 +110,24 @@ class Fetch_WC_Product_Mapper {
 		return $out;
 	}
 
-	/** Deactivation payloads for a product about to be deleted (each variation for a variable one). */
+	/**
+	 * Rows that switch off a product (or one variation) about to be deleted.
+	 * Live Fetch rejects a row without a price, so these are the full rows
+	 * built from the product's current values with isActive=false.
+	 */
 	public static function deactivations( WC_Product $product ) {
-		if ( ! $product->is_type( 'variable' ) ) {
+		if ( $product instanceof WC_Product_Variation ) {
+			$parent = wc_get_product( $product->get_parent_id() );
+			foreach ( $parent instanceof WC_Product ? self::to_fetch_items( $parent, true ) : array() as $pair ) {
+				if ( $pair[1]->get_id() === $product->get_id() ) {
+					return array( $pair[0] );
+				}
+			}
 			return array( self::deactivation( self::ref( $product ), $product->get_name() ) );
 		}
 		$out = array();
-		foreach ( $product->get_children() as $child_id ) {
-			$variation = wc_get_product( $child_id );
-			if ( $variation instanceof WC_Product_Variation ) {
-				$out[] = self::deactivation( self::ref( $variation ), $product->get_name() );
-			}
+		foreach ( self::to_fetch_items( $product, true ) as $pair ) {
+			$out[] = $pair[0];
 		}
 		return $out;
 	}
@@ -183,7 +192,7 @@ class Fetch_WC_Product_Mapper {
 		return $images;
 	}
 
-	/** Minimal payload that switches a deleted product off on Fetch. */
+	/** Minimal row, only for a variation whose parent is already gone. */
 	public static function deactivation( $ref, $name ) {
 		return array(
 			'ref'      => $ref,

@@ -3,9 +3,13 @@
  * Brings Fetch orders into WooCommerce and keeps their status in step.
  *
  * Orders arrive by webhook (instant) and by a 2-minute poll (safety net for a
- * missed or unreachable webhook). Both paths go through import(), which is
- * idempotent on the Fetch order id, so a webhook and a poll seeing the same
- * order never create two WooCommerce orders.
+ * missed or unreachable webhook). Both paths go through import(), which holds
+ * a per-order lock (an INSERT IGNORE on the unique option name) while it looks
+ * the order up and creates or updates it, so a webhook and a poll seeing the
+ * same order at the same moment never create two WooCommerce orders.
+ *
+ * Fetch masks the customer's details 2 hours after the order. An order first
+ * imported masked is completed when an unmasked copy arrives.
  *
  * Fetch reserves the stock when the customer orders, so WooCommerce stock is
  * reduced on import and restored if Fetch cancels or the shop rejects. Those
@@ -21,11 +25,15 @@ class Fetch_WC_Order_Sync {
 	const POLL_INTERVAL    = 120;
 	const POLL_LOOKBACK    = 2 * DAY_IN_SECONDS;
 	const PAYMENT_METHOD   = 'fetch';
+	const LOCK_PREFIX      = 'fetch_wc_lock_';
+	/** A lock older than this was left by a request that died; it is taken over. */
+	const LOCK_TIMEOUT     = 300;
 
 	const META_ORDER_ID     = '_fetch_order_id';
 	const META_ORDER_NUMBER = '_fetch_order_number';
 	const META_STATUS       = '_fetch_status';
 	const META_STORE_ID     = '_fetch_store_id';
+	const META_MASKED       = '_fetch_customer_masked';
 
 	public static function init() {
 		add_action( self::POLL_HOOK, array( __CLASS__, 'poll' ) );
@@ -75,9 +83,13 @@ class Fetch_WC_Order_Sync {
 
 	/**
 	 * Create the WooCommerce order for a Fetch order, or bring an existing one
-	 * up to date. Returns the WooCommerce order, or null when skipped.
+	 * up to date. Returns the WooCommerce order, null when skipped, or false
+	 * when another request is handling the same order right now.
+	 *
+	 * @param int $wait Seconds to wait for that other request to finish.
+	 * @return WC_Order|null|false
 	 */
-	public static function import( array $data ) {
+	public static function import( array $data, $wait = 0 ) {
 		if ( empty( $data['orderId'] ) || empty( $data['status'] ) ) {
 			return null;
 		}
@@ -85,22 +97,98 @@ class Fetch_WC_Order_Sync {
 			return null; // Another store on the same credential.
 		}
 
-		$existing = self::find( (string) $data['orderId'] );
-		if ( $existing ) {
-			self::apply_status( $existing, (string) $data['status'] );
-			return $existing;
+		$fetch_id = (string) $data['orderId'];
+		$deadline = microtime( true ) + max( 0, (int) $wait );
+		$token    = self::lock( $fetch_id );
+		while ( null === $token && microtime( true ) < $deadline ) {
+			usleep( 250000 );
+			$token = self::lock( $fetch_id );
+		}
+		if ( null === $token ) {
+			return false;
 		}
 
-		// A cancelled order we never saw needs no WooCommerce order.
-		if ( in_array( $data['status'], Fetch_WC_Order_Mapper::RESTOCKED, true ) ) {
+		try {
+			$existing = self::find( $fetch_id );
+			if ( $existing ) {
+				self::fill_customer( $existing, $data );
+				self::apply_status( $existing, (string) $data['status'] );
+				return $existing;
+			}
+
+			// A cancelled order we never saw needs no WooCommerce order.
+			if ( in_array( $data['status'], Fetch_WC_Order_Mapper::RESTOCKED, true ) ) {
+				return null;
+			}
+
+			$order = self::create( $data );
+			if ( $order && 'DRAFT' === $data['status'] && Fetch_WC_Settings::enabled( 'auto_accept' ) ) {
+				Fetch_WC_Order_Actions::run( $order, 'accept', array( 'prepMinutes' => (int) Fetch_WC_Settings::get( 'prep_minutes' ) ) );
+			}
+			return $order;
+		} finally {
+			self::unlock( $fetch_id, $token );
+		}
+	}
+
+	/**
+	 * Take the lock for one Fetch order. Returns its token, or null while
+	 * another request holds it.
+	 */
+	public static function lock( $fetch_order_id, $now = null ) {
+		global $wpdb;
+		$now   = null === $now ? time() : (int) $now;
+		$name  = self::LOCK_PREFIX . md5( (string) $fetch_order_id );
+		$token = $now . ':' . bin2hex( random_bytes( 8 ) );
+
+		$taken = self::insert_lock( $name, $token );
+		if ( null === $taken ) {
+			return $token; // The database refused the statement; carry on unlocked as before 1.1.1.
+		}
+		if ( $taken ) {
+			return $token;
+		}
+		$held = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+		if ( null !== $held && $now - (int) $held < self::LOCK_TIMEOUT ) {
 			return null;
 		}
-
-		$order = self::create( $data );
-		if ( $order && 'DRAFT' === $data['status'] && Fetch_WC_Settings::enabled( 'auto_accept' ) ) {
-			Fetch_WC_Order_Actions::run( $order, 'accept', array( 'prepMinutes' => (int) Fetch_WC_Settings::get( 'prep_minutes' ) ) );
+		if ( null !== $held ) {
+			// Delete only the stale token we read, so two requests cannot both take over.
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", $name, $held ) );
 		}
-		return $order;
+		return self::insert_lock( $name, $token ) ? $token : null;
+	}
+
+	public static function unlock( $fetch_order_id, $token ) {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s", self::LOCK_PREFIX . md5( (string) $fetch_order_id ), $token ) );
+	}
+
+	/** @return bool|null true when inserted, false when the row exists, null on a database error. */
+	private static function insert_lock( $name, $token ) {
+		global $wpdb;
+		$result = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, $token ) );
+		if ( false === $result ) {
+			Fetch_WC_Logger::error( 'Could not lock a Fetch order for import: ' . $wpdb->last_error );
+			return null;
+		}
+		return 1 === (int) $wpdb->rows_affected;
+	}
+
+	/** Write the real customer details over ones that were imported masked. */
+	private static function fill_customer( WC_Order $order, array $data ) {
+		$address = Fetch_WC_Order_Mapper::customer_update( '1' === (string) $order->get_meta( self::META_MASKED ), $data );
+		if ( ! $address ) {
+			return;
+		}
+		$order->set_address( $address, 'billing' );
+		$order->set_address( $address, 'shipping' );
+		if ( '' === $order->get_customer_note() ) {
+			$order->set_customer_note( Fetch_WC_Order_Mapper::customer_note( $data ) );
+		}
+		$order->delete_meta_data( self::META_MASKED );
+		$order->save();
+		$order->add_order_note( __( 'Customer details completed from Fetch.', 'fetch-for-woocommerce' ) );
 	}
 
 	public static function find( $fetch_order_id ) {
@@ -157,6 +245,9 @@ class Fetch_WC_Order_Sync {
 		$order->update_meta_data( self::META_ORDER_NUMBER, isset( $data['orderNumber'] ) ? (string) $data['orderNumber'] : '' );
 		$order->update_meta_data( self::META_STORE_ID, isset( $data['storeId'] ) ? (string) $data['storeId'] : '' );
 		$order->update_meta_data( self::META_STATUS, (string) $data['status'] );
+		if ( Fetch_WC_Order_Mapper::is_masked( $data ) ) {
+			$order->update_meta_data( self::META_MASKED, '1' );
+		}
 
 		// Fetch's prices already include VAT and its total is authoritative.
 		$order->calculate_totals( false );

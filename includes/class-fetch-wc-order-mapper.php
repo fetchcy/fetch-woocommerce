@@ -39,6 +39,9 @@ class Fetch_WC_Order_Mapper {
 	/** Statuses after which Fetch has released the stock again. */
 	const RESTOCKED = array( 'CANCELLED', 'REJECTED', 'REFUNDED' );
 
+	/** Fetch masks the customer's name, phone and address 2 hours after the order. */
+	const MASK = '******';
+
 	public static function wc_status( $fetch_status ) {
 		return isset( self::STATUS_MAP[ $fetch_status ] ) ? self::STATUS_MAP[ $fetch_status ] : 'on-hold';
 	}
@@ -72,29 +75,58 @@ class Fetch_WC_Order_Mapper {
 		return array( $parts[0], isset( $parts[1] ) ? $parts[1] : '' );
 	}
 
-	/** Address fields shared by billing and shipping. */
+	/** True when Fetch sent any of the customer's name, phone or street masked. */
+	public static function is_masked( array $order ) {
+		$customer = isset( $order['customer'] ) && is_array( $order['customer'] ) ? $order['customer'] : array();
+		$address  = isset( $customer['address'] ) && is_array( $customer['address'] ) ? $customer['address'] : array();
+		foreach ( array( 'name' => $customer, 'phone' => $customer, 'line1' => $address ) as $key => $source ) {
+			if ( isset( $source[ $key ] ) && self::MASK === trim( (string) $source[ $key ] ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Address fields shared by billing and shipping; masked values become empty. */
 	public static function address( array $order ) {
 		$customer = isset( $order['customer'] ) && is_array( $order['customer'] ) ? $order['customer'] : array();
 		$address  = isset( $customer['address'] ) && is_array( $customer['address'] ) ? $customer['address'] : array();
-		list( $first, $last ) = self::split_name( isset( $customer['name'] ) ? $customer['name'] : '' );
+		list( $first, $last ) = self::split_name( self::unmask( isset( $customer['name'] ) ? $customer['name'] : '' ) );
 
 		return array(
 			'first_name' => $first,
 			'last_name'  => $last,
-			'address_1'  => isset( $address['line1'] ) ? (string) $address['line1'] : '',
-			'city'       => isset( $address['city'] ) ? (string) $address['city'] : '',
-			'postcode'   => isset( $address['postalCode'] ) ? (string) $address['postalCode'] : '',
+			'address_1'  => self::unmask( isset( $address['line1'] ) ? $address['line1'] : '' ),
+			'city'       => self::unmask( isset( $address['city'] ) ? $address['city'] : '' ),
+			'postcode'   => self::unmask( isset( $address['postalCode'] ) ? $address['postalCode'] : '' ),
 			'country'    => 'CY',
-			'phone'      => isset( $customer['phone'] ) ? (string) $customer['phone'] : '',
+			'phone'      => self::unmask( isset( $customer['phone'] ) ? $customer['phone'] : '' ),
 		);
 	}
 
+	/**
+	 * The address to write over an imported order's, or null to leave it alone:
+	 * only an order first imported masked is completed, and only from an
+	 * unmasked copy, so good details are never replaced by masked ones.
+	 */
+	public static function customer_update( $stored_masked, array $order ) {
+		if ( ! $stored_masked || self::is_masked( $order ) ) {
+			return null;
+		}
+		return self::address( $order );
+	}
+
 	public static function customer_note( array $order ) {
-		$note = isset( $order['customer']['address']['notes'] ) ? trim( (string) $order['customer']['address']['notes'] ) : '';
-		return $note;
+		$note = isset( $order['customer']['address']['notes'] ) ? (string) $order['customer']['address']['notes'] : '';
+		return self::unmask( $note );
 	}
 
 	public static function is_pickup( array $order ) {
 		return isset( $order['deliveryType'] ) && 'pickup' === $order['deliveryType'];
+	}
+
+	private static function unmask( $value ) {
+		$value = trim( (string) $value );
+		return self::MASK === $value ? '' : $value;
 	}
 }

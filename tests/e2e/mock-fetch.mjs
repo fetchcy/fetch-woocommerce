@@ -1,4 +1,6 @@
 // Minimal mock of the Fetch Partner API for the e2e test. Records every request.
+// Applies the live PUT /products rules: price on every row, at most 200 rows
+// and 500 KB per request.
 import http from 'node:http';
 import fs from 'node:fs';
 
@@ -17,6 +19,7 @@ function validateProduct(p, i) {
   // Live Fetch stores accept SIMPLE products only through PUT /products.
   if (p.productType !== 'SIMPLE') problems.push(`${at}.productType=${p.productType} (live accepts SIMPLE only)`);
   if (p.variants || p.matrix) problems.push(`${at} carries variants/matrix`);
+  if (p.price === undefined) problems.push(`${at}.price missing (required on a live store)`);
   if (p.price !== undefined && !money(p.price)) problems.push(`${at}.price not 2-decimal string: ${p.price}`);
   if (p.salePrice !== undefined && !money(p.salePrice)) problems.push(`${at}.salePrice not 2-decimal string: ${p.salePrice}`);
   if (p.stockCount !== undefined && !Number.isInteger(p.stockCount)) problems.push(`${at}.stockCount not int`);
@@ -49,9 +52,12 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && p === '/api/v1/partner/stores') return send(res, 200, { data: [{ id: STORE, name: 'Mock Shop', city: 'Nicosia', isActive: true }] });
 
     if (req.method === 'PUT' && p === `/api/v1/partner/stores/${STORE}/products`) {
-      (body?.products || []).forEach(validateProduct);
+      const list = body?.products || [];
+      if (list.length > 200) problems.push(`PUT /products with ${list.length} products (live max 200)`);
+      if (Buffer.byteLength(raw) > 500 * 1024) problems.push(`PUT /products body ${Buffer.byteLength(raw)} bytes (max 500 KB)`);
+      list.forEach(validateProduct);
       fs.writeFileSync(LOG, JSON.stringify({ requests, problems }, null, 2));
-      const results = (body?.products || []).map((x, i) => ({ ref: x.ref, productId: `prod-${x.ref}`, status: 'created', matchedBy: null }));
+      const results = list.map((x, i) => ({ ref: x.ref, productId: `prod-${x.ref}`, status: 'created', matchedBy: null }));
       return send(res, 200, { created: results.length, updated: 0, rejected: 0, results });
     }
 
