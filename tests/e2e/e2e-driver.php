@@ -15,6 +15,45 @@ function product_stock( $id ) {
 	return $p ? $p->get_stock_quantity() : null;
 }
 
+/**
+ * Submit the settings form through the real admin-post handler. Its redirect
+ * is turned into an exception so the request carries on.
+ */
+function save_settings( array $fields ) {
+	$s     = Fetch_WC_Settings::all();
+	$_POST = array_merge(
+		array(
+			'action'          => Fetch_WC_Admin::ACTION,
+			'do'              => 'save',
+			'environment'     => $s['environment'],
+			'custom_base_url' => $s['custom_base_url'],
+			'client_id'       => $s['client_id'],
+			'store_id'        => $s['store_id'],
+			'sync_products'   => $s['sync_products'],
+			'import_orders'   => $s['import_orders'],
+			'auto_accept'     => $s['auto_accept'],
+			'prep_minutes'    => (string) $s['prep_minutes'],
+			'price_markup'    => (string) $s['price_markup'],
+			'_wpnonce'        => wp_create_nonce( Fetch_WC_Admin::ACTION ),
+		),
+		$fields
+	);
+	$_REQUEST = $_POST;
+	$redirect = static function ( $location ) {
+		throw new RuntimeException( $location );
+	};
+	add_filter( 'wp_redirect', $redirect );
+	try {
+		Fetch_WC_Admin::handle();
+	} catch ( RuntimeException $e ) {
+		// Redirected back to the settings page, as in the browser.
+	}
+	remove_filter( 'wp_redirect', $redirect );
+	$notice = get_transient( 'fetch_wc_notice_' . get_current_user_id() );
+	delete_transient( 'fetch_wc_notice_' . get_current_user_id() );
+	return is_array( $notice ) ? $notice[1] : null;
+}
+
 switch ( $step ) {
 	case 'ping':
 		$out['ready'] = class_exists( 'WooCommerce' ) && class_exists( 'Fetch_WC_Settings' );
@@ -96,6 +135,48 @@ switch ( $step ) {
 		$out['pending'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
 		Fetch_WC_Product_Sync::flush();
 		$out['stock'] = product_stock( $id );
+		break;
+
+	case 'markup':
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['notice']         = save_settings( array( 'price_markup' => '10' ) );
+		$out['saved']          = Fetch_WC_Settings::get( 'price_markup' );
+		$out['bulk_scheduled'] = as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		// Run the queued full sync now instead of waiting for Action Scheduler.
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		Fetch_WC_Product_Sync::bulk_page( 1 );
+		Fetch_WC_Product_Sync::bulk_page( 2 );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		// Saving the same markup again must not resend the catalogue.
+		$out['same_notice']         = save_settings( array( 'price_markup' => '10.00' ) );
+		$out['same_bulk_scheduled'] = as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['wc_price']            = wc_get_product( wc_get_product_id_by_sku( 'CBL-001' ) )->get_regular_price( 'edit' );
+		break;
+
+	case 'server':
+		// Runs last: switching server clears the store, as for a real merchant.
+		require_once ABSPATH . 'wp-admin/includes/template.php';
+		$render = static function () {
+			ob_start();
+			Fetch_WC_Admin::render();
+			return ob_get_clean();
+		};
+		$html = $render();
+		preg_match_all( '/<option value="(production|staging|custom)"/', $html, $m );
+		$out['options']            = $m[1];
+		$out['help']               = false !== strpos( $html, 'Your key decides whether you see test data.' );
+		$out['custom_shown']       = (bool) preg_match( '/id="fetch_wc_custom_base_url_row"\s*>/', $html );
+		$out['custom_url_kept']    = Fetch_WC_Settings::base_url();
+		$out['token_before']       = (bool) get_transient( Fetch_WC_Api::TOKEN_TRANSIENT );
+		$out['notice']             = save_settings( array( 'environment' => 'staging' ) );
+		$out['staging_url']        = Fetch_WC_Settings::base_url();
+		$out['token_after']        = (bool) get_transient( Fetch_WC_Api::TOKEN_TRANSIENT );
+		$html                      = $render();
+		$out['staging_selected']   = (bool) preg_match( '/<option value="staging"\s+selected/', $html );
+		$out['custom_hidden']      = (bool) preg_match( '/id="fetch_wc_custom_base_url_row"\s*hidden/', $html );
+		save_settings( array( 'environment' => 'nonsense' ) );
+		$out['garbage_saved_as']   = Fetch_WC_Settings::get( 'environment' );
+		$out['production_url']     = Fetch_WC_Settings::base_url();
 		break;
 
 	case 'poll':

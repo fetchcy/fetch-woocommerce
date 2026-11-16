@@ -1,12 +1,24 @@
 <?php
 /**
  * Standalone unit tests (no WordPress): `php tests/unit.php`.
- * Covers webhook signature verification and the order mapping rules.
+ * Covers webhook signature verification, the order mapping rules, the
+ * price markup maths and the server setting.
  */
 
 define( 'ABSPATH', __DIR__ . '/' );
+
+// Just enough of WordPress for Fetch_WC_Settings to read a saved option.
+$GLOBALS['fake_options'] = array();
+function get_option( $name, $default = false ) {
+	return array_key_exists( $name, $GLOBALS['fake_options'] ) ? $GLOBALS['fake_options'][ $name ] : $default;
+}
+function untrailingslashit( $value ) {
+	return rtrim( $value, '/\\' );
+}
 require __DIR__ . '/../includes/class-fetch-wc-order-mapper.php';
 require __DIR__ . '/../includes/class-fetch-wc-webhook.php';
+require __DIR__ . '/../includes/class-fetch-wc-settings.php';
+require __DIR__ . '/../includes/class-fetch-wc-product-mapper.php';
 
 $failures = 0;
 $passes   = 0;
@@ -106,6 +118,45 @@ $pickup = array(
 check( 'pickup', Fetch_WC_Order_Mapper::is_pickup( $pickup ), true );
 check( 'pickup null postcode → empty string', Fetch_WC_Order_Mapper::address( $pickup )['postcode'], '' );
 check( 'missing customer block', Fetch_WC_Order_Mapper::address( array() )['first_name'], 'Fetch' );
+
+// --- Price markup --------------------------------------------------------------
+check( 'markup 0% leaves the price alone', Fetch_WC_Product_Mapper::apply_markup( '10.00', 0 ), '10.00' );
+check( 'markup 10% on 10.00', Fetch_WC_Product_Mapper::apply_markup( '10.00', 10 ), '11.00' );
+check( 'markup 10% on 9.50', Fetch_WC_Product_Mapper::apply_markup( '9.50', 10 ), '10.45' );
+check( 'markup 12.5% on 10.00', Fetch_WC_Product_Mapper::apply_markup( '10.00', 12.5 ), '11.25' );
+check( 'markup 12.5% on 7.99 rounds half-up', Fetch_WC_Product_Mapper::apply_markup( '7.99', 12.5 ), '8.99' );
+check( 'markup 15% on 9.99 (11.4885) rounds half-up', Fetch_WC_Product_Mapper::apply_markup( '9.99', 15 ), '11.49' );
+check( 'markup 10% on 0.05 (0.055) rounds half-up', Fetch_WC_Product_Mapper::apply_markup( '0.05', 10 ), '0.06' );
+check( 'markup 100% doubles', Fetch_WC_Product_Mapper::apply_markup( '19.99', 100 ), '39.98' );
+check( 'markup on 0.00 stays 0.00', Fetch_WC_Product_Mapper::apply_markup( '0.00', 10 ), '0.00' );
+check( 'markup returns a decimal string', is_string( Fetch_WC_Product_Mapper::apply_markup( '10.00', 10 ) ), true );
+
+check( 'sanitize markup "10"', Fetch_WC_Settings::sanitize_markup( '10' ), 10.0 );
+check( 'sanitize markup "12,5"', Fetch_WC_Settings::sanitize_markup( '12,5' ), 12.5 );
+check( 'sanitize markup "15 %"', Fetch_WC_Settings::sanitize_markup( '15 %' ), 15.0 );
+check( 'sanitize markup blank → 0', Fetch_WC_Settings::sanitize_markup( '' ), 0.0 );
+check( 'sanitize markup garbage → 0', Fetch_WC_Settings::sanitize_markup( 'abc' ), 0.0 );
+check( 'sanitize markup negative → 0', Fetch_WC_Settings::sanitize_markup( '-5' ), 0.0 );
+check( 'sanitize markup above 100 → 100', Fetch_WC_Settings::sanitize_markup( '150' ), 100.0 );
+check( 'sanitize markup keeps 2 decimals', Fetch_WC_Settings::sanitize_markup( '7.456' ), 7.46 );
+
+// --- Server setting -------------------------------------------------------------
+$server = function ( $saved ) {
+	$GLOBALS['fake_options'] = null === $saved ? array() : array( Fetch_WC_Settings::OPTION => $saved );
+	return Fetch_WC_Settings::base_url();
+};
+check( 'server: nothing saved → production', $server( null ), 'https://api.fetch.com.cy' );
+check( 'server: saved before the setting existed → production', $server( array( 'client_id' => 'x' ) ), 'https://api.fetch.com.cy' );
+check( 'server: existing "production" unchanged', $server( array( 'environment' => 'production', 'custom_base_url' => 'https://ignored.example' ) ), 'https://api.fetch.com.cy' );
+check( 'server: staging', $server( array( 'environment' => 'staging' ) ), 'https://api-stg.fetch.com.cy' );
+check( 'server: existing "custom" unchanged, trailing slash dropped', $server( array( 'environment' => 'custom', 'custom_base_url' => 'https://partner.example/' ) ), 'https://partner.example' );
+check( 'server: unknown value → production', $server( array( 'environment' => 'sandbox' ) ), 'https://api.fetch.com.cy' );
+check( 'sanitize environment production', Fetch_WC_Settings::sanitize_environment( 'production' ), 'production' );
+check( 'sanitize environment staging', Fetch_WC_Settings::sanitize_environment( 'staging' ), 'staging' );
+check( 'sanitize environment custom', Fetch_WC_Settings::sanitize_environment( 'custom' ), 'custom' );
+check( 'sanitize environment garbage', Fetch_WC_Settings::sanitize_environment( 'sandbox' ), 'production' );
+check( 'sanitize environment blank', Fetch_WC_Settings::sanitize_environment( '' ), 'production' );
+$GLOBALS['fake_options'] = array();
 
 echo "$passes passed, $failures failed\n";
 exit( $failures ? 1 : 0 );

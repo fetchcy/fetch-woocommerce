@@ -40,10 +40,11 @@ It uses the [Fetch Partner API](https://developer.fetch.com.cy).
 
 | Setting | What it does |
 |---|---|
-| Server | **Production** (`https://api.fetch.com.cy`) for live stores. **Custom URL** only if Fetch gives you a different address, for example for testing. |
+| Server | **Production** (`https://api.fetch.com.cy`, the default). Live keys, and sandbox keys Fetch issues for testing, both use Production: your key decides whether you see test data. **Staging** (`https://api-stg.fetch.com.cy`) only for keys Fetch has moved to staging. **Custom URL** only if Fetch gives you a different address. Changing the server signs in again and asks you to pick your store again. |
 | Client ID / Client secret | Your Partner API key. The secret is stored in your WordPress database and is never shown again after saving. |
 | Fetch store | The Fetch store your WooCommerce products and orders belong to. |
 | Sync to Fetch | Turns automatic product, price and stock sync on or off. |
+| Price markup (%) | 0–100, default 0. Added to every price and sale price sent to Fetch, e.g. 10 sends a €10.00 product as €11.00. Your WooCommerce prices are not changed. Changing it resends all products to Fetch automatically. |
 | Import Fetch orders | Turns order import on or off. |
 | Auto-accept | Accepts new Fetch orders automatically, using the preparation time below. |
 | Preparation time | Minutes you need to prepare an order. The courier is booked to collect after this. |
@@ -69,7 +70,7 @@ Fetch maintains the name, photos and category of shared catalogue products.
 | WooCommerce | Fetch |
 |---|---|
 | Name, description | Name, description (HTML is stripped) |
-| Regular price, sale price | Price and sale price, **VAT included** (calculated with your WooCommerce tax settings) |
+| Regular price, sale price | Price and sale price, **VAT included** (calculated with your WooCommerce tax settings), plus your **price markup** if you set one, rounded half-up to the cent |
 | Stock (managed) | Exact quantity |
 | Stock (not managed) | Sold without a stock limit; **Out of stock** switches it off |
 | Published and visible in the catalogue | Active on Fetch |
@@ -112,6 +113,8 @@ The parent's description, brand, category and tags are shared by all of them.
 
 You must accept a new Fetch order within **15 minutes**.
 Auto-accept does this for you.
+
+Imported orders keep Fetch's prices, which are what the customer paid, including any price markup.
 
 Items that match no WooCommerce product by SKU are still added to the order by name, with a note, but no stock is reduced for them.
 

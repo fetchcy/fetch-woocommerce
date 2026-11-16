@@ -66,12 +66,20 @@ class Fetch_WC_Admin {
 					<tr>
 						<th scope="row"><label for="fetch_wc_environment"><?php esc_html_e( 'Server', 'fetch-for-woocommerce' ); ?></label></th>
 						<td>
+							<?php $environment = Fetch_WC_Settings::sanitize_environment( $s['environment'] ); ?>
 							<select id="fetch_wc_environment" name="environment">
-								<option value="production" <?php selected( $s['environment'], 'production' ); ?>><?php esc_html_e( 'Production (api.fetch.com.cy)', 'fetch-for-woocommerce' ); ?></option>
-								<option value="custom" <?php selected( $s['environment'], 'custom' ); ?>><?php esc_html_e( 'Custom URL', 'fetch-for-woocommerce' ); ?></option>
+								<option value="production" <?php selected( $environment, 'production' ); ?>><?php esc_html_e( 'Production (api.fetch.com.cy)', 'fetch-for-woocommerce' ); ?></option>
+								<option value="staging" <?php selected( $environment, 'staging' ); ?>><?php esc_html_e( 'Staging (api-stg.fetch.com.cy)', 'fetch-for-woocommerce' ); ?></option>
+								<option value="custom" <?php selected( $environment, 'custom' ); ?>><?php esc_html_e( 'Custom URL', 'fetch-for-woocommerce' ); ?></option>
 							</select>
-							<p><input type="url" id="fetch_wc_custom_base_url" name="custom_base_url" class="regular-text" placeholder="https://" value="<?php echo esc_attr( $s['custom_base_url'] ); ?>">
-							<span class="description"><?php esc_html_e( 'Only used with "Custom URL".', 'fetch-for-woocommerce' ); ?></span></p>
+							<p class="description"><?php esc_html_e( 'Live keys, and sandbox keys Fetch issues for testing, both use Production. Your key decides whether you see test data.', 'fetch-for-woocommerce' ); ?></p>
+							<p class="description"><?php esc_html_e( 'Staging is only for keys Fetch has moved to staging.', 'fetch-for-woocommerce' ); ?></p>
+							<p id="fetch_wc_custom_base_url_row" <?php echo 'custom' === $environment ? '' : 'hidden'; ?>><input type="url" id="fetch_wc_custom_base_url" name="custom_base_url" class="regular-text" placeholder="https://" value="<?php echo esc_attr( $s['custom_base_url'] ); ?>"></p>
+							<script>
+								document.getElementById( 'fetch_wc_environment' ).addEventListener( 'change', function () {
+									document.getElementById( 'fetch_wc_custom_base_url_row' ).hidden = 'custom' !== this.value;
+								} );
+							</script>
 						</td>
 					</tr>
 					<tr>
@@ -113,6 +121,13 @@ class Fetch_WC_Admin {
 							<label><input type="checkbox" name="sync_products" value="yes" <?php checked( $s['sync_products'], 'yes' ); ?>> <?php esc_html_e( 'Send product, price and stock changes to Fetch automatically', 'fetch-for-woocommerce' ); ?></label>
 							<p class="description"><?php esc_html_e( 'Simple and variable products. Each product (and each variation) is matched on Fetch by its SKU.', 'fetch-for-woocommerce' ); ?></p>
 							<p><button type="submit" class="button" name="do" value="bulk_sync" <?php disabled( ! Fetch_WC_Settings::is_connected() ); ?>><?php esc_html_e( 'Sync all products now', 'fetch-for-woocommerce' ); ?></button></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="fetch_wc_price_markup"><?php esc_html_e( 'Price markup (%)', 'fetch-for-woocommerce' ); ?></label></th>
+						<td>
+							<input type="number" id="fetch_wc_price_markup" name="price_markup" min="0" max="100" step="0.01" style="width:80px" value="<?php echo esc_attr( (string) Fetch_WC_Settings::markup() ); ?>"> %
+							<p class="description"><?php esc_html_e( 'Added to every price and sale price sent to Fetch, e.g. 10 sends a €10.00 product as €11.00. Your WooCommerce prices are not changed.', 'fetch-for-woocommerce' ); ?></p>
 						</td>
 					</tr>
 				</table>
@@ -185,8 +200,8 @@ class Fetch_WC_Admin {
 			wp_die( esc_html__( 'You are not allowed to change these settings.', 'fetch-for-woocommerce' ) );
 		}
 
-		$do = isset( $_POST['do'] ) ? sanitize_key( wp_unslash( $_POST['do'] ) ) : 'save';
-		self::save( $_POST );
+		$do            = isset( $_POST['do'] ) ? sanitize_key( wp_unslash( $_POST['do'] ) ) : 'save';
+		$markup_resync = self::save( $_POST );
 
 		switch ( $do ) {
 			case 'connect':
@@ -202,7 +217,12 @@ class Fetch_WC_Admin {
 				self::register_webhook();
 				break;
 			default:
-				self::notice( 'success', __( 'Settings saved.', 'fetch-for-woocommerce' ) );
+				self::notice(
+					'success',
+					$markup_resync
+						? __( 'Settings saved. The price markup changed, so all products are being resent to Fetch.', 'fetch-for-woocommerce' )
+						: __( 'Settings saved.', 'fetch-for-woocommerce' )
+				);
 		}
 
 		Fetch_WC_Order_Sync::schedule_poll();
@@ -210,22 +230,25 @@ class Fetch_WC_Admin {
 		exit;
 	}
 
-	/** @param array<string,mixed> $post Raw $_POST. */
+	/**
+	 * @param array<string,mixed> $post Raw $_POST.
+	 * @return bool True when a changed price markup started a full product resync.
+	 */
 	private static function save( array $post ) {
 		$old = Fetch_WC_Settings::all();
 		$get = static function ( $key ) use ( $post ) {
 			return isset( $post[ $key ] ) ? sanitize_text_field( wp_unslash( $post[ $key ] ) ) : '';
 		};
 
-		$environment = $get( 'environment' );
-		$new         = array(
-			'environment'     => in_array( $environment, array( 'production', 'custom' ), true ) ? $environment : 'production',
+		$new = array(
+			'environment'     => Fetch_WC_Settings::sanitize_environment( $get( 'environment' ) ),
 			'custom_base_url' => esc_url_raw( $get( 'custom_base_url' ) ),
 			'client_id'       => $get( 'client_id' ),
 			'sync_products'   => 'yes' === $get( 'sync_products' ) ? 'yes' : 'no',
 			'import_orders'   => 'yes' === $get( 'import_orders' ) ? 'yes' : 'no',
 			'auto_accept'     => 'yes' === $get( 'auto_accept' ) ? 'yes' : 'no',
 			'prep_minutes'    => max( 0, min( 180, (int) $get( 'prep_minutes' ) ) ),
+			'price_markup'    => Fetch_WC_Settings::sanitize_markup( $get( 'price_markup' ) ),
 		);
 
 		$secret = isset( $post['client_secret'] ) ? trim( (string) wp_unslash( $post['client_secret'] ) ) : '';
@@ -264,6 +287,15 @@ class Fetch_WC_Admin {
 		}
 
 		Fetch_WC_Settings::update( $new );
+
+		// Every Fetch price depends on the markup, so resend the catalogue when it changes.
+		$old_markup = Fetch_WC_Settings::sanitize_markup( $old['price_markup'] );
+		if ( $new['price_markup'] === $old_markup || ! Fetch_WC_Settings::is_connected() || 'yes' !== $new['sync_products'] ) {
+			return false;
+		}
+		Fetch_WC_Logger::info( sprintf( 'Price markup changed from %s%% to %s%%; resending all products.', $old_markup, $new['price_markup'] ) );
+		Fetch_WC_Product_Sync::start_bulk_sync();
+		return true;
 	}
 
 	private static function connect() {

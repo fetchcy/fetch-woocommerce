@@ -9,8 +9,13 @@ class Fetch_WC_Settings {
 
 	const OPTION = 'fetch_wc_settings';
 
+	/**
+	 * Sandbox keys are issued on production too (the key, not the server,
+	 * decides test data), so staging is only for keys Fetch moved there.
+	 */
 	const ENVIRONMENTS = array(
 		'production' => 'https://api.fetch.com.cy',
+		'staging'    => 'https://api-stg.fetch.com.cy',
 	);
 
 	public static function defaults() {
@@ -22,6 +27,7 @@ class Fetch_WC_Settings {
 			'store_id'           => '',
 			'store_name'         => '',
 			'sync_products'      => 'yes',
+			'price_markup'       => 0,
 			'import_orders'      => 'yes',
 			'auto_accept'        => 'no',
 			'prep_minutes'       => 15,
@@ -44,16 +50,38 @@ class Fetch_WC_Settings {
 		update_option( self::OPTION, array_merge( self::all(), $values ), false );
 	}
 
+	/** "production", "staging" or "custom"; anything else is production. */
+	public static function sanitize_environment( $raw ) {
+		$env = (string) $raw;
+		return 'custom' === $env || isset( self::ENVIRONMENTS[ $env ] ) ? $env : 'production';
+	}
+
 	public static function base_url() {
-		$env = self::get( 'environment' );
+		$env = self::sanitize_environment( self::get( 'environment' ) );
 		if ( 'custom' === $env ) {
 			return untrailingslashit( (string) self::get( 'custom_base_url' ) );
 		}
-		return isset( self::ENVIRONMENTS[ $env ] ) ? self::ENVIRONMENTS[ $env ] : self::ENVIRONMENTS['production'];
+		return self::ENVIRONMENTS[ $env ];
 	}
 
 	public static function is_connected() {
 		return '' !== self::get( 'client_id' ) && '' !== self::get( 'client_secret' ) && '' !== self::get( 'store_id' );
+	}
+
+	/**
+	 * "Price markup (%)" input → a percentage in 0–100 with at most 2 decimals.
+	 * Accepts "12,5" and a trailing "%"; blank means 0; anything else non-numeric is 0.
+	 */
+	public static function sanitize_markup( $raw ) {
+		$value = str_replace( array( ',', '%', ' ' ), array( '.', '', '' ), trim( (string) $raw ) );
+		if ( '' === $value || ! is_numeric( $value ) ) {
+			return 0.0;
+		}
+		return round( max( 0.0, min( 100.0, (float) $value ) ), 2 );
+	}
+
+	public static function markup() {
+		return self::sanitize_markup( self::get( 'price_markup' ) );
 	}
 
 	public static function enabled( $key ) {

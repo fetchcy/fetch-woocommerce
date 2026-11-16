@@ -6,7 +6,7 @@ Tested up to: 6.8
 Requires PHP: 7.4
 WC requires at least: 8.0
 WC tested up to: 9.9
-Stable tag: 1.0.0
+Stable tag: 1.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -40,6 +40,10 @@ By SKU. A product's SKU (or, for variable products, each variation's SKU) is its
 
 Fetch prices are what the customer pays, VAT included. The plugin sends your regular and sale prices including tax, using your WooCommerce tax settings, so it works whether you enter prices with or without VAT.
 
+= Can I charge more on Fetch than on my website? =
+
+Yes. Set **Price markup (%)** under WooCommerce → Fetch. It is added to every price and sale price sent to Fetch: 10 sends a €10.00 product as €11.00, rounded to the cent. Your WooCommerce prices are not changed. Changing the markup resends all products to Fetch automatically. Imported Fetch orders keep the prices the customer paid on Fetch.
+
 = What about stock? =
 
 If WooCommerce manages stock for a product, Fetch gets the exact quantity. If it does not, the product sells on Fetch without a stock limit, and "Out of stock" switches it off on Fetch.
@@ -57,6 +61,10 @@ Both run. The webhook delivers new orders in seconds and is verified with a sign
 WooCommerce → Fetch shows recent activity. The full log is under WooCommerce → Status → Logs, source "fetch". Each product also stores its last sync result.
 
 == Changelog ==
+
+= 1.1.0 =
+* New: **Price markup (%)** setting. Adds a percentage to every price and sale price sent to Fetch without changing your WooCommerce prices. Changing it resends all products to Fetch automatically.
+* New: **Staging** server option (api-stg.fetch.com.cy) for keys Fetch has moved to staging. Sandbox keys keep using Production. The custom URL field now only shows when "Custom URL" is selected.
 
 = 1.0.0 =
 * First release: product, price and stock sync; order import with accept, ready and reject; signed webhooks with polling fallback.
