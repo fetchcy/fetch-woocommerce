@@ -32,6 +32,16 @@
       }
     },
     {
+      "step": "installPlugin",
+      "pluginData": {
+        "resource": "wordpress.org/plugins",
+        "slug": "polylang"
+      },
+      "options": {
+        "activate": false
+      }
+    },
+    {
       "step": "activatePlugin",
       "pluginPath": "fetch-woocommerce/fetch-for-woocommerce.php"
     }

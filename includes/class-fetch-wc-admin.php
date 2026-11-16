@@ -150,6 +150,15 @@ class Fetch_WC_Admin {
 						<td>
 							<label><input type="checkbox" name="sync_products" value="yes" <?php checked( $s['sync_products'], 'yes' ); ?>> <?php esc_html_e( 'Send product, price and stock changes to Fetch automatically', 'fetch-for-woocommerce' ); ?></label>
 							<p class="description"><?php esc_html_e( 'Simple and variable products. Each product (and each variation) is matched on Fetch by its SKU.', 'fetch-for-woocommerce' ); ?></p>
+							<p class="description" id="fetch_wc_language"><?php esc_html_e( 'Multilingual shops (WPML, Polylang) sync products in the default language only; translations are not sent to Fetch.', 'fetch-for-woocommerce' ); ?>
+								<?php
+								$language = Fetch_WC_Language::default_language_name();
+								if ( '' !== $language ) {
+									/* translators: %s: language name, e.g. English */
+									echo ' <strong>' . esc_html( sprintf( __( 'Synced language: %s (default)', 'fetch-for-woocommerce' ), $language ) ) . '</strong>';
+								}
+								?>
+							</p>
 							<p><button type="submit" class="button" name="do" value="bulk_sync" <?php disabled( ! Fetch_WC_Settings::is_connected() ); ?>><?php esc_html_e( 'Sync all products now', 'fetch-for-woocommerce' ); ?></button></p>
 						</td>
 					</tr>

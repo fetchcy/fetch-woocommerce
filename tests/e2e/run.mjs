@@ -301,6 +301,61 @@ try {
   ok('notice cleared and the run logged', !mApply.notice_shown && mApply.pending === null && mApply.log.some((m) => /^Mirror finished: .*switched off 300, 0 errors\.$/.test(m)) && mApply.mode_after === 'add_update', mApply.log);
   ok('mirror requests pass the live rules (≤200 rows, ≤500 KB, price on every row, limit ≤500)', mockLog().problems.length === 0 && listingScans().every((r) => r.query.limit === '500'), mockLog().problems);
 
+  // --- 1.2.1: multilingual shops (Polylang) sync the default language only ---------------
+  const act = await step('lang_activate');
+  ok('Polylang activated', act.active === true && act.error === null, act);
+  await step('lang_setup', { admin: '1' });
+  let p0 = productPuts().length;
+  const lp = await step('lang_products');
+  const lpRows = productPuts().slice(p0).flatMap((r) => r.body.products);
+  const TRANSLATED = ['CCAF 011-el', 'CCAF 011-ru', 'TMUG-BLK-el'];
+  const rowsFor = (rows, ref) => rows.filter((x) => x.ref === ref);
+  ok('Polylang set up: English default, products translatable, older products have no language', lp.default === 'en' && sameSet(lp.languages, ['en', 'el', 'ru']) && lp.translated === true && lp.no_language === false, lp);
+  ok('saving originals and translations sends only the English products and variations', ['CCAF 011', 'TEA-1', 'TMUG-BLK', 'TMUG-WHT'].every((ref) => rowsFor(lpRows, ref).length === 1) && !lpRows.some((x) => TRANSLATED.includes(x.ref)) && lpRows.every((x) => !/[α-ωА-я]/i.test(x.name)), lpRows.map((x) => `${x.ref} ${x.name}`));
+  ok('translations queued before they had a language are skipped at flush, never marked synced', lp.queued.includes(lp.ids.cup_el) && JSON.stringify(lp.translation_status) === '["",""]', { queued: lp.queued, status: lp.translation_status });
+  ok('a translation sharing the SKU does not overwrite the original (TEA-1: Green Tea, 5.00 + 10%)', rowsFor(lpRows, 'TEA-1')[0]?.name === 'Green Tea' && rowsFor(lpRows, 'TEA-1')[0]?.price === '5.50' && rowsFor(lpRows, 'TMUG-WHT')[0]?.name === 'Travel Mug – White', { tea: rowsFor(lpRows, 'TEA-1'), white: rowsFor(lpRows, 'TMUG-WHT') });
+  ok('editing a translation\'s price or stock queues nothing', Array.isArray(lp.pending_after_translation_edit) && lp.pending_after_translation_edit.length === 0, lp.pending_after_translation_edit);
+
+  // Listings an older plugin version pushed from the translations.
+  await seedListings([
+    { listingId: 'ml-el', ref: 'CCAF 011-el', name: 'Κούπα καφέ', price: '11.00' },
+    { listingId: 'ml-ru', ref: 'CCAF 011-ru', name: 'Кофейная чашка', price: '11.00' },
+    { listingId: 'ml-mug-el', ref: 'TMUG-BLK-el', name: 'Κούπα ταξιδιού – Black', price: '8.80' },
+  ]);
+  b0 = listingBatches().length;
+  const lprev = await step('lang_preview', { admin: '1' });
+  ok('preview in wp-admin with Polylang filtering on Greek: only the 3 translation listings would go', lprev.is_admin === true && lprev.preview?.off === 3 && sameSet(lprev.preview.samples, ['Κούπα καφέ', 'Кофейная чашка', 'Κούπα ταξιδιού – Black']) && listingBatches().length === b0, lprev);
+
+  p0 = productPuts().length;
+  const lm = await step('lang_mirror');
+  const lmOff = listingBatches().slice(b0).flatMap((r) => r.body.items);
+  const lmRows = productPuts().slice(p0).flatMap((r) => r.body.products);
+  L = await mockListings();
+  ok('mirror: listings from translations are switched off, the originals are kept', sameSet(lmOff.map((r) => r.listingId), ['ml-el', 'ml-ru', 'ml-mug-el']) && ['lst-CCAF 011', 'lst-TEA-1', 'lst-TMUG-BLK', 'lst-TMUG-WHT', 'lst-CBL-001'].every((id) => L[id]?.isActive === true) && Object.values(L).filter((l) => /^Big Pack/.test(l.name) && l.isActive).length === 209 && lm.log.some((m) => /^Mirror finished: .*switched off 3, 0 errors\.$/.test(m)), { off: lmOff, log: lm.log });
+  ok('full sync sends no translation, and a shared SKU once', !lmRows.some((x) => TRANSLATED.includes(x.ref)) && rowsFor(lmRows, 'TEA-1').length === 1 && rowsFor(lmRows, 'TEA-1')[0].name === 'Green Tea' && rowsFor(lmRows, 'CBL-001').length === 1, { tea: rowsFor(lmRows, 'TEA-1'), n: lmRows.length });
+
+  await seedOrder({ ...order, orderId: 'ord-ml', orderNumber: '238410', items: [
+    { listingId: 'lst-TEA-1', ref: 'TEA-1', name: 'Green Tea', variantName: null, quantity: 2, unitPrice: '5.50', totalPrice: '11.00', vatRate: '19' },
+    { listingId: 'lst-CCAF 011', ref: 'CCAF 011', name: 'Coffee Cup', variantName: null, quantity: 1, unitPrice: '11.00', totalPrice: '11.00', vatRate: '19' },
+  ], subtotal: '22.00', total: '24.45' });
+  await step('poll_only');
+  const lo = await step('lang_order_info', { order: 'ord-ml' });
+  ok('order refs resolve to the English originals, even with the SKU and ref copied onto a translation', lo.items?.length === 2 && lo.items.some((i) => i.product_id === lo.ids.tea && i.qty === 2) && lo.items.some((i) => i.product_id === lo.ids.cup && i.qty === 1), lo);
+  ok('stock reduced on the originals, translations untouched (8 → 6, 7 → 6)', JSON.stringify(lo.stock) === JSON.stringify({ tea: 6, tea_el: 8, cup: 6, cup_el: 7 }), lo.stock);
+  await setStatus('ord-ml', 'DELIVERED');
+
+  p0 = productPuts().length;
+  const ld = await step('lang_delete');
+  const ldRows = productPuts().slice(p0).flatMap((r) => r.body.products);
+  L = await mockListings();
+  ok('trashing or deleting translations (incl. one sharing the SKU, and a variation) switches nothing off', ld.pending.length === 0 && ld.deactivations.length === 0 && ldRows.length === 0 && ['lst-CCAF 011', 'lst-TEA-1', 'lst-TMUG-WHT'].every((id) => L[id]?.isActive === true), { ld, ldRows });
+
+  const lr = await step('lang_readout');
+  ok('settings: default-language help line and "Synced language: English (default)"', lr.help === true && lr.readout === 'Synced language: English (default)' && lr.deactivated === true, lr);
+  const la = await step('lang_after');
+  ok('without a multilingual plugin: help line stays, no language readout', la.help === true && la.readout === false, la);
+  ok('multilingual requests pass the live rules', mockLog().problems.length === 0, mockLog().problems);
+
   const srv = await step('server');
   ok('server select offers Production, Staging, Custom URL', JSON.stringify(srv.options) === '["production","staging","custom"]' && srv.help === true, srv);
   ok('existing "custom" server kept, its URL field shown', srv.custom_url_kept === 'http://127.0.0.1:9099' && srv.custom_shown === true, srv);

@@ -306,7 +306,11 @@ class Fetch_WC_Order_Sync {
 		return (bool) $product;
 	}
 
-	/** Our frozen ref first, then the SKU (the ref defaults to the SKU). */
+	/**
+	 * Our frozen ref first, then the SKU (the ref defaults to the SKU). A
+	 * translation that shares the SKU, or carries the original's copied ref,
+	 * resolves to its default-language original: the product that was synced.
+	 */
 	private static function product_for_ref( $ref ) {
 		if ( '' === $ref ) {
 			return null;
@@ -317,6 +321,7 @@ class Fetch_WC_Order_Sync {
 				'post_status'    => 'any',
 				'meta_key'       => Fetch_WC_Product_Mapper::META_REF,
 				'meta_value'     => $ref,
+				'lang'           => '', // Polylang: every language; the original is picked below.
 				'fields'         => 'ids',
 				'posts_per_page' => 1,
 			)
@@ -325,7 +330,7 @@ class Fetch_WC_Order_Sync {
 		if ( ! $id && 0 === strpos( $ref, 'wc-' ) ) {
 			$id = (int) substr( $ref, 3 );
 		}
-		$product = $id ? wc_get_product( $id ) : null;
+		$product = $id ? wc_get_product( Fetch_WC_Language::original_id( $id ) ) : null;
 		return $product instanceof WC_Product ? $product : null;
 	}
 

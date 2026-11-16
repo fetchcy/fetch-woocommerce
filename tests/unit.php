@@ -3,8 +3,9 @@
  * Standalone unit tests (no WordPress): `php tests/unit.php`.
  * Covers webhook signature verification, the order mapping rules, the
  * price markup maths, the server setting, request batching, the full
- * deactivation row, masked customer details, the per-order import lock and
- * the "Mirror this shop 1:1" scan, plan, guard and switch-off batches.
+ * deactivation row, masked customer details, the per-order import lock,
+ * the "Mirror this shop 1:1" scan, plan, guard and switch-off batches, and
+ * default-language-only sync with stubbed WPML filters and Polylang functions.
  */
 
 define( 'ABSPATH', __DIR__ . '/' );
@@ -51,14 +52,93 @@ function wp_get_attachment_image_url( $id, $size ) {
 	return false;
 }
 define( 'DAY_IN_SECONDS', 86400 );
+define( 'FETCH_WC_VERSION', 'test' );
 
-/** A simple product, just the getters the mapper reads. */
+// Hooks, posts, products and HTTP: just enough for the multilingual tests.
+$GLOBALS['fake_filters']  = array();
+$GLOBALS['fake_posts']    = array(); // id => [type, parent]
+$GLOBALS['fake_products'] = array(); // id => WC_Product
+$GLOBALS['fake_requests'] = array();
+function add_filter( $hook, $callback ) {
+	$GLOBALS['fake_filters'][ $hook ][] = $callback;
+	return true;
+}
+function remove_filter( $hook, $callback ) {
+	foreach ( isset( $GLOBALS['fake_filters'][ $hook ] ) ? $GLOBALS['fake_filters'][ $hook ] : array() as $i => $cb ) {
+		if ( $cb === $callback ) {
+			unset( $GLOBALS['fake_filters'][ $hook ][ $i ] );
+		}
+	}
+	return true;
+}
+function has_filter( $hook, $callback = false ) {
+	return ! empty( $GLOBALS['fake_filters'][ $hook ] );
+}
+function apply_filters( $hook, $value, ...$args ) {
+	foreach ( isset( $GLOBALS['fake_filters'][ $hook ] ) ? $GLOBALS['fake_filters'][ $hook ] : array() as $cb ) {
+		$value = $cb( $value, ...$args );
+	}
+	return $value;
+}
+function update_option( $name, $value, $autoload = null ) {
+	$GLOBALS['fake_options'][ $name ] = $value;
+	return true;
+}
+function get_post_type( $id ) {
+	return isset( $GLOBALS['fake_posts'][ $id ] ) ? $GLOBALS['fake_posts'][ $id ][0] : false;
+}
+function wp_get_post_parent_id( $id ) {
+	return isset( $GLOBALS['fake_posts'][ $id ] ) ? $GLOBALS['fake_posts'][ $id ][1] : 0;
+}
+function wc_get_product( $id ) {
+	return isset( $GLOBALS['fake_products'][ $id ] ) ? $GLOBALS['fake_products'][ $id ] : false;
+}
+/** Pages through every fake product, like WooCommerce, after the same query filter. */
+function wc_get_products( $args ) {
+	$GLOBALS['fake_wp_query'] = apply_filters( 'woocommerce_product_data_store_cpt_get_products_query', array( 'post_type' => 'product' ), $args, null );
+	$ids = array();
+	foreach ( $GLOBALS['fake_posts'] as $id => $post ) {
+		if ( 'product' === $post[0] ) {
+			$ids[] = $id;
+		}
+	}
+	return array_slice( $ids, ( $args['page'] - 1 ) * $args['limit'], $args['limit'] );
+}
+function get_transient( $name ) {
+	// A cached token, so the API client never asks a server for one.
+	return array( 'token' => 'test-token', 'key' => md5( Fetch_WC_Settings::base_url() . '|' . Fetch_WC_Settings::get( 'client_id' ) ) );
+}
+function home_url() {
+	return 'https://shop.example';
+}
+/** Records each request instead of sending it; answers like PUT /products. */
+function wp_remote_request( $url, $args ) {
+	$body                      = json_decode( $args['body'], true );
+	$GLOBALS['fake_requests'][] = array( 'method' => $args['method'], 'url' => $url, 'body' => $body );
+	$results                   = array();
+	foreach ( $body['products'] as $row ) {
+		$results[] = array( 'ref' => $row['ref'], 'status' => 'created', 'productId' => 'prod-' . $row['ref'] );
+	}
+	return array( 'code' => 200, 'body' => wp_json_encode( array( 'created' => count( $results ), 'updated' => 0, 'rejected' => 0, 'results' => $results ) ) );
+}
+function wp_remote_retrieve_response_code( $response ) {
+	return $response['code'];
+}
+function wp_remote_retrieve_body( $response ) {
+	return $response['body'];
+}
+
+/** A simple (or variable) product, just the getters the mapper reads. */
 class WC_Product {
 	public $data;
 	public function __construct( array $data ) {
-		$this->data = $data + array( 'id' => 1, 'status' => 'publish', 'sku' => '', 'meta' => array(), 'sale' => '', 'visibility' => 'visible' );
+		$this->data = $data + array( 'id' => 1, 'type' => 'simple', 'status' => 'publish', 'sku' => '', 'meta' => array(), 'sale' => '', 'visibility' => 'visible', 'children' => array(), 'parent' => 0, 'stock' => 1 );
 	}
-	public function is_type( $type ) { return 'simple' === $type; }
+	public function is_type( $type ) { return $this->data['type'] === $type; }
+	public function get_children() { return $this->data['children']; }
+	public function get_parent_id() { return $this->data['parent']; }
+	public function update_meta_data( $key, $value ) { $this->data['meta'][ $key ] = $value; }
+	public function save_meta_data() {}
 	public function get_id() { return $this->data['id']; }
 	public function get_name() { return $this->data['name']; }
 	public function get_sku( $context = 'view' ) { return $this->data['sku']; }
@@ -77,6 +157,13 @@ class WC_Product {
 	public function get_stock_status() { return 'instock'; }
 	public function get_image_id() { return 0; }
 	public function get_gallery_image_ids() { return array(); }
+}
+class WC_Product_Variation extends WC_Product {
+	public function __construct( array $data ) {
+		parent::__construct( $data + array( 'type' => 'variation' ) );
+	}
+	public function variation_is_visible() { return true; }
+	public function get_variation_attributes( $with_prefix = true ) { return array(); }
 }
 
 /** $wpdb on an in-memory SQLite options table with option_name UNIQUE, like WordPress. */
@@ -118,6 +205,8 @@ $GLOBALS['wpdb'] = new Fake_WPDB();
 require __DIR__ . '/../includes/class-fetch-wc-order-mapper.php';
 require __DIR__ . '/../includes/class-fetch-wc-webhook.php';
 require __DIR__ . '/../includes/class-fetch-wc-settings.php';
+require __DIR__ . '/../includes/class-fetch-wc-logger.php';
+require __DIR__ . '/../includes/class-fetch-wc-language.php';
 require __DIR__ . '/../includes/class-fetch-wc-product-mapper.php';
 require __DIR__ . '/../includes/class-fetch-wc-product-sync.php';
 require __DIR__ . '/../includes/class-fetch-wc-order-sync.php';
@@ -527,6 +616,189 @@ check( 'a rejected row (207) counts as an error, the rest apply', array( $r['sta
 $api         = new Fake_Listings_Api( array( listing( 'k1', 'KEEP-1' ), listing( 'x1', null ) ), 500 );
 $api->reject = array( 'x1' );
 check( 'every row rejected (422) → all errors, not a transport failure', array_values( array_intersect_key( Fetch_WC_Mirror::execute( $api, 'store-1', $keep2 ), array_flip( array( 'status', 'switched_off', 'errors' ) ) ) ), array( 'done', 0, 1 ) );
+
+
+// --- Multilingual shops: only the default language goes to Fetch --------------------------
+// A WooCommerce shop with English originals and Greek / Russian translations as their own posts.
+$GLOBALS['fake_options'] = array( Fetch_WC_Settings::OPTION => array( 'environment' => 'custom', 'custom_base_url' => 'http://fetch.invalid', 'client_id' => 'c', 'client_secret' => 's', 'store_id' => 'store-1' ) );
+$catalogue = array(
+	// id => [type, parent, language, sku, price, original id]
+	10 => array( 'product', 0, 'en', 'CCAF 011', '10', 10 ),
+	11 => array( 'product', 0, 'el', 'CCAF 011-el', '10', 10 ),
+	12 => array( 'product', 0, 'ru', 'CCAF 011-ru', '10', 10 ),
+	13 => array( 'product', 0, '', 'NOLANG-1', '3', 13 ),       // no language assigned: default
+	20 => array( 'product', 0, 'en', 'TEA-1', '5', 20 ),
+	21 => array( 'product', 0, 'el', 'TEA-1', '9', 20 ),        // translation sharing the original's SKU
+	30 => array( 'product', 0, 'en', 'MUG', '0', 30 ),          // variable
+	31 => array( 'product_variation', 30, 'en', 'MUG-BLK', '4', 31 ),
+	32 => array( 'product_variation', 30, 'en', 'MUG-WHT', '4', 32 ),
+	40 => array( 'product', 0, 'el', 'MUG-el', '0', 30 ),       // variable translation
+	41 => array( 'product_variation', 40, 'el', 'MUG-BLK-el', '4', 31 ),
+	42 => array( 'product_variation', 40, 'el', 'MUG-WHT', '4', 32 ), // shares the original variation's SKU
+);
+$lang_of = function ( $id ) use ( &$catalogue ) {
+	return isset( $catalogue[ $id ] ) ? $catalogue[ $id ][2] : '';
+};
+$build_shop = function () use ( &$catalogue ) {
+	$GLOBALS['fake_posts']    = array();
+	$GLOBALS['fake_products'] = array();
+	foreach ( $catalogue as $id => $c ) {
+		$GLOBALS['fake_posts'][ $id ] = array( $c[0], $c[1] );
+		$data = array( 'id' => $id, 'name' => 'P' . $id, 'sku' => $c[3], 'price' => $c[4], 'parent' => $c[1] );
+		if ( 'product_variation' === $c[0] ) {
+			$GLOBALS['fake_products'][ $id ] = new WC_Product_Variation( $data );
+			continue;
+		}
+		if ( in_array( $id, array( 30, 40 ), true ) ) {
+			$data['type']     = 'variable';
+			$data['children'] = 30 === $id ? array( 31, 32 ) : array( 41, 42 );
+		}
+		$GLOBALS['fake_products'][ $id ] = new WC_Product( $data );
+	}
+	// WPML / WCML copy custom fields to translations: the translation looks synced too.
+	$GLOBALS['fake_products'][21]->data['meta'] = array( '_fetch_product_id' => 'prod-TEA-1', '_fetch_ref' => 'TEA-1' );
+	$GLOBALS['fake_products'][10]->data['meta'] = array( '_fetch_product_id' => 'prod-CCAF 011' );
+};
+$sent_refs = function () {
+	$refs = array();
+	foreach ( $GLOBALS['fake_requests'] as $r ) {
+		foreach ( $r['body']['products'] as $row ) {
+			$refs[] = $row['ref'];
+		}
+	}
+	return $refs;
+};
+$sent_row = function ( $ref ) {
+	foreach ( $GLOBALS['fake_requests'] as $r ) {
+		foreach ( $r['body']['products'] as $row ) {
+			if ( $row['ref'] === $ref ) {
+				return $row;
+			}
+		}
+	}
+	return null;
+};
+$default_refs = array( 'CCAF 011', 'NOLANG-1', 'TEA-1', 'MUG-BLK', 'MUG-WHT' );
+$all_ids      = array( 10, 11, 12, 13, 20, 21, 30, 40 );
+
+// The same checks for each plugin (and none).
+$multilingual = function ( $label ) use ( $build_shop, $sent_refs, $sent_row, $default_refs, $all_ids ) {
+	$build_shop();
+	$GLOBALS['fake_requests'] = array();
+	check( "$label: default language", Fetch_WC_Language::default_language(), 'en' );
+	check( "$label: original is default", Fetch_WC_Language::is_default( 10 ), true );
+	check( "$label: Greek and Russian translations are not", array( Fetch_WC_Language::is_default( 11 ), Fetch_WC_Language::is_default( 12 ) ), array( false, false ) );
+	check( "$label: no language assigned counts as default", Fetch_WC_Language::is_default( 13 ), true );
+	check( "$label: variation of the original is default", Fetch_WC_Language::is_default( 31 ), true );
+	check( "$label: variation of a translation is not", Fetch_WC_Language::is_default( 41 ), false );
+	check( "$label: a translation resolves to its original (order import)", array( Fetch_WC_Language::original_id( 11 ), Fetch_WC_Language::original_id( 21 ) ), array( 10, 20 ) );
+	check( "$label: an original and a product with no language resolve to themselves", array( Fetch_WC_Language::original_id( 10 ), Fetch_WC_Language::original_id( 13 ) ), array( 10, 13 ) );
+
+	// Full sync / hooks flush: one request with the default-language rows only.
+	check( "$label: sync reaches Fetch", Fetch_WC_Product_Sync::sync_ids( $all_ids ), true );
+	$refs = $sent_refs();
+	sort( $refs );
+	$want = $default_refs;
+	sort( $want );
+	check( "$label: only default-language products and variations are sent", $refs, $want );
+	check( "$label: a shared SKU is sent once, with the original's price (5 + 19% VAT)", $sent_row( 'TEA-1' )['price'], '5.95' );
+	check( "$label: a variation sharing the original's SKU is sent once, from the original", array( count( array_keys( $refs, 'MUG-WHT', true ) ), $sent_row( 'MUG-WHT' )['name'] ), array( 1, 'P30' ) );
+	$GLOBALS['fake_requests'] = array();
+	check( "$label: a page of translations only sends nothing", array( Fetch_WC_Product_Sync::sync_ids( array( 11, 12, 21, 40 ) ), $GLOBALS['fake_requests'] ), array( true, array() ) );
+
+	// Save / stock hooks.
+	unset( $GLOBALS['fake_options'][ Fetch_WC_Product_Sync::PENDING_OPTION ] );
+	foreach ( array( 11, 12, 21, 40, 41, 42 ) as $id ) {
+		Fetch_WC_Product_Sync::queue( $id );
+	}
+	check( "$label: saving a translation (or its variation) queues nothing", get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ), array() );
+	Fetch_WC_Product_Sync::queue( 10 );
+	Fetch_WC_Product_Sync::queue( 31 );
+	check( "$label: saving the original (or its variation) queues it", array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) ), array( 10, 30 ) );
+
+	// Delete / trash hooks.
+	unset( $GLOBALS['fake_options'][ Fetch_WC_Product_Sync::DEACTIVATE_OPTION ] );
+	Fetch_WC_Product_Sync::queue_deletion( 21 ); // shares the SKU and carries the original's copied meta
+	Fetch_WC_Product_Sync::queue_deletion( 11 );
+	Fetch_WC_Product_Sync::queue_deletion( 42 );
+	check( "$label: deleting a translation does not switch off the original", get_option( Fetch_WC_Product_Sync::DEACTIVATE_OPTION, array() ), array() );
+	Fetch_WC_Product_Sync::queue_deletion( 10 );
+	$off = get_option( Fetch_WC_Product_Sync::DEACTIVATE_OPTION, array() );
+	check( "$label: deleting the original still switches it off", array( array_keys( $off ), $off['CCAF 011']['isActive'] ), array( array( 'CCAF 011' ), false ) );
+
+	// Mirror: translations are not kept, so their old listings are switched off.
+	$keep = Fetch_WC_Mirror::shop_refs();
+	$kept = array_keys( $keep );
+	sort( $kept );
+	check( "$label: mirror keeps the default-language refs only", $kept, $want );
+	check( "$label: the product query covers every language", array( $GLOBALS['fake_wp_query']['lang'], $GLOBALS['fake_wp_query']['suppress_filters'] ), array( '', true ) );
+	check( "$label: the query filter is removed afterwards", has_filter( 'woocommerce_product_data_store_cpt_get_products_query' ), false );
+	$plan = Fetch_WC_Mirror::plan( array( listing( 'l1', 'CCAF 011' ), listing( 'l2', 'CCAF 011-el' ), listing( 'l3', 'CCAF 011-ru' ), listing( 'l4', 'MUG-BLK-el' ), listing( 'l5', 'TEA-1' ) ), $keep );
+	check( "$label: listings that came from translations are switched off", array_column( $plan['off'], 'listingId' ), array( 'l2', 'l3', 'l4' ) );
+	$api = new Fake_Listings_Api( array( listing( 'l1', 'CCAF 011' ), listing( 'l2', 'CCAF 011-el' ), listing( 'l3', 'CCAF 011-ru' ), listing( 'l5', 'TEA-1' ), listing( 'l6', 'MUG-BLK' ), listing( 'l7', 'MUG-WHT' ) ), 500 );
+	$r   = Fetch_WC_Mirror::execute( $api, 'store-1', $keep, true );
+	check( "$label: preview counts the translations as switched off", array( $r['off'], $r['kept'], $api->batches ), array( 2, 4, array() ) );
+	check( "$label: settings readout", Fetch_WC_Language::default_language_name(), 'English' );
+};
+
+// No multilingual plugin: every product is synced as before.
+$build_shop();
+$GLOBALS['fake_requests'] = array();
+check( 'no plugin: none detected', array( Fetch_WC_Language::plugin(), Fetch_WC_Language::default_language(), Fetch_WC_Language::default_language_name() ), array( '', '', '' ) );
+check( 'no plugin: every product is default', array( Fetch_WC_Language::is_default( 10 ), Fetch_WC_Language::is_default( 11 ), Fetch_WC_Language::is_default( 41 ) ), array( true, true, true ) );
+check( 'no plugin: original_id is the product itself', Fetch_WC_Language::original_id( 11 ), 11 );
+Fetch_WC_Product_Sync::sync_ids( array( 10, 11, 12 ) );
+check( 'no plugin: translations-as-products are sent like any product', $sent_refs(), array( 'CCAF 011', 'CCAF 011-el', 'CCAF 011-ru' ) );
+check( 'no plugin: mirror keeps every product\'s ref (shared SKUs once)', count( Fetch_WC_Mirror::shop_refs() ), 8 );
+check( 'no plugin: the product query is not touched', isset( $GLOBALS['fake_wp_query']['lang'] ), false );
+
+// WPML (+ WooCommerce Multilingual), through its public filters.
+add_filter( 'wpml_default_language', function () { return 'en'; } );
+add_filter(
+	'wpml_element_language_details',
+	function ( $value, $args ) use ( $lang_of ) {
+		$expected = 'post_' . get_post_type( $args['element_id'] );
+		$lang     = $args['element_type'] === $expected ? $lang_of( $args['element_id'] ) : '';
+		return '' === $lang ? null : (object) array( 'element_id' => $args['element_id'], 'language_code' => $lang );
+	},
+	10,
+	2
+);
+add_filter(
+	'wpml_object_id',
+	function ( $id, $type, $return_original, $lang ) use ( &$catalogue ) {
+		return 'en' === $lang && isset( $catalogue[ $id ] ) ? $catalogue[ $id ][5] : null;
+	}
+);
+add_filter( 'wpml_active_languages', function () { return array( 'en' => array( 'code' => 'en', 'translated_name' => 'English' ), 'el' => array( 'code' => 'el', 'translated_name' => 'Greek' ) ); } );
+check( 'WPML: detected', Fetch_WC_Language::plugin(), 'wpml' );
+$multilingual( 'WPML' );
+// WPML set up without a default language yet: nothing is filtered.
+$wpml_default                                   = $GLOBALS['fake_filters']['wpml_default_language'];
+$GLOBALS['fake_filters']['wpml_default_language'] = array( function () { return false; } );
+check( 'WPML without a default language: every product is default', Fetch_WC_Language::is_default( 11 ), true );
+$GLOBALS['fake_filters']['wpml_default_language'] = $wpml_default;
+
+// Polylang (Polylang for WooCommerce, or products made translatable), through its functions.
+// Its WPML compatibility layer answers wpml_* filters too; Polylang must win.
+$GLOBALS['fake_filters'] = array( 'wpml_default_language' => array( function () { return 'xx'; } ), 'wpml_element_language_details' => array( function () { return null; } ) );
+if ( ! function_exists( 'pll_default_language' ) ) {
+	function pll_default_language( $field = 'slug' ) {
+		return 'name' === $field ? 'English' : 'en';
+	}
+	function pll_get_post_language( $id, $field = 'slug' ) {
+		// Polylang does not give variations a language of their own.
+		$lang = 'product' === get_post_type( $id ) ? $GLOBALS['fake_lang_of']( $id ) : '';
+		return '' === $lang ? false : $lang;
+	}
+	function pll_get_post( $id, $lang = '' ) {
+		return 'product' === get_post_type( $id ) && 'en' === $lang ? $GLOBALS['fake_original_of'][ $id ] : false;
+	}
+}
+$GLOBALS['fake_lang_of']     = $lang_of;
+$GLOBALS['fake_original_of'] = array_map( function ( $c ) { return $c[5]; }, $catalogue );
+check( 'Polylang: detected (before its WPML compatibility filters)', Fetch_WC_Language::plugin(), 'polylang' );
+$multilingual( 'Polylang' );
 
 echo "$passes passed, $failures failed\n";
 exit( $failures ? 1 : 0 );

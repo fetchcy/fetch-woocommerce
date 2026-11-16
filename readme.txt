@@ -6,7 +6,7 @@ Tested up to: 6.8
 Requires PHP: 7.4
 WC requires at least: 8.0
 WC tested up to: 9.9
-Stable tag: 1.2.0
+Stable tag: 1.2.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -36,6 +36,12 @@ Fetch for WooCommerce connects your shop to [Fetch](https://fetch.com.cy) throug
 = How are my products matched with Fetch? =
 
 By SKU. A product's SKU (or, for variable products, each variation's SKU) is its reference on Fetch. Fetch lists every variation as its own product, named after the parent and its attributes. Products without a SKU use `wc-<product id>`. The reference is remembered after the first sync, so changing a SKU later updates the same Fetch product instead of creating a second one.
+
+= My shop is multilingual. Are translations synced? =
+
+No. With **WPML** (with or without WooCommerce Multilingual) or **Polylang**, each translation is a separate WooCommerce product, so only products in your site's **default language** are sent to Fetch, with their variations. Translations are skipped everywhere: the full sync, saves and stock changes, and deleting or trashing a translation never switches off the original. In **Mirror this shop 1:1**, Fetch products that came from translations are switched off like any other product this shop does not sell. Fetch orders reduce stock on the default-language product. Products with no language assigned count as default. WooCommerce → Fetch shows the synced language.
+
+**TranslatePress** and **Weglot** keep translations inside the original product, so nothing changes for them.
 
 = Which prices does Fetch show? =
 
@@ -73,6 +79,9 @@ Both run. The webhook delivers new orders in seconds and is verified with a sign
 WooCommerce → Fetch shows recent activity. The full log is under WooCommerce → Status → Logs, source "fetch". Each product also stores its last sync result.
 
 == Changelog ==
+
+= 1.2.1 =
+* Fix: multilingual shops (WPML, WooCommerce Multilingual, Polylang) sync products in the default language only. Translations were sent as extra Fetch products ("CCAF 011-el", "CCAF 011-ru"), and a translation sharing the original's SKU could overwrite it. Translations are now skipped by the full sync, product saves and stock changes; deleting or trashing a translation no longer switches off the original; **Mirror this shop 1:1** switches off listings that came from translations; and Fetch orders reduce stock on the default-language product. The settings page shows the synced language.
 
 = 1.2.0 =
 * New: **Catalogue mode** setting with **Mirror this shop 1:1**. At the end of a full sync, every product in your Fetch store that this shop does not sell is switched off on Fetch (never deleted); products that come back are switched on again by the normal sync. Includes a **Preview**, a confirmation step when more than half of your active Fetch products would be switched off, and a log of every run. The default, **Add and update only**, keeps today's behaviour.

@@ -3,6 +3,9 @@
  * Runs inside WordPress Playground: GET /e2e-driver.php?step=<name>.
  * Each step prints JSON; the node runner asserts on it.
  */
+if ( ! empty( $_GET['admin'] ) ) {
+	define( 'WP_ADMIN', true ); // Load plugins as on a wp-admin screen (Polylang filters admin lists by language).
+}
 require dirname( __DIR__ ) . '/wp-load.php';
 header( 'Content-Type: application/json' );
 wp_set_current_user( 1 );
@@ -82,11 +85,61 @@ function post_action( $do ) {
 function run_full_sync() {
 	save_settings( array( 'do' => 'bulk_sync' ) );
 	as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
-	$n = count( wc_get_products( array( 'type' => array( 'simple', 'variable' ), 'status' => array( 'publish', 'private', 'draft' ), 'limit' => -1, 'return' => 'ids' ) ) );
-	for ( $page = 1; $page <= (int) ceil( $n / Fetch_WC_Product_Sync::CHUNK ) + 1; $page++ ) {
-		Fetch_WC_Product_Sync::bulk_page( $page ); // The last page is empty: that ends the sync.
+	// Each page queues the next one; the empty last page ends the sync and queues nothing.
+	for ( $page = 1; $page <= 100; $page++ ) {
+		Fetch_WC_Product_Sync::bulk_page( $page );
+		$more = as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		if ( ! $more ) {
+			break;
+		}
 	}
-	as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+}
+
+/** A Polylang language, through whichever API this Polylang version has. */
+function pll_e2e_add_language( array $args ) {
+	$model = PLL()->model;
+	if ( isset( $model->languages ) && is_object( $model->languages ) && method_exists( $model->languages, 'add' ) ) {
+		return $model->languages->add( $args );
+	}
+	return $model->add_language( $args );
+}
+
+function make_simple( $name, $sku, $price, $stock ) {
+	$p = new WC_Product_Simple();
+	$p->set_name( $name );
+	$p->set_sku( $sku );
+	$p->set_regular_price( $price );
+	$p->set_manage_stock( true );
+	$p->set_stock_quantity( $stock );
+	$p->set_status( 'publish' );
+	return $p->save();
+}
+
+function make_variable( $name, $sku, array $variation_skus ) {
+	$attr = new WC_Product_Attribute();
+	$attr->set_name( 'Colour' );
+	$attr->set_options( array_keys( $variation_skus ) );
+	$attr->set_visible( true );
+	$attr->set_variation( true );
+	$p = new WC_Product_Variable();
+	$p->set_name( $name );
+	$p->set_sku( $sku );
+	$p->set_attributes( array( $attr ) );
+	$p->set_status( 'publish' );
+	$id = $p->save();
+	foreach ( $variation_skus as $colour => $vsku ) {
+		$v = new WC_Product_Variation();
+		$v->set_parent_id( $id );
+		$v->set_attributes( array( 'colour' => $colour ) );
+		$v->set_sku( $vsku );
+		$v->set_regular_price( '8' );
+		$v->set_manage_stock( true );
+		$v->set_stock_quantity( 5 );
+		$v->set_status( 'publish' );
+		$v->save();
+	}
+	return $id;
 }
 
 function recent_log( $n = 8 ) {
@@ -457,6 +510,132 @@ switch ( $step ) {
 		$out['notice_shown'] = false !== strpos( render_page(), 'id="fetch_wc_mirror_notice"' );
 		save_settings( array( 'catalogue_mode' => 'add_update' ) );
 		$out['mode_after'] = Fetch_WC_Settings::get( 'catalogue_mode' );
+		break;
+
+	case 'lang_activate':
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		$result        = activate_plugin( 'polylang/polylang.php' );
+		$out['error']  = is_wp_error( $result ) ? $result->get_error_message() : null;
+		$out['active'] = is_plugin_active( 'polylang/polylang.php' );
+		break;
+
+	case 'lang_setup':
+		// English first: Polylang makes the first language the default.
+		foreach ( array( array( 'English', 'en', 'en_US', 0 ), array( 'Ελληνικά', 'el', 'el', 1 ), array( 'Русский', 'ru', 'ru_RU', 2 ) ) as $l ) {
+			$r = pll_e2e_add_language( array( 'name' => $l[0], 'slug' => $l[1], 'locale' => $l[2], 'rtl' => false, 'term_group' => $l[3] ) );
+			$out['add'][ $l[1] ] = is_wp_error( $r ) ? $r->get_error_message() : $r;
+		}
+		// Products translatable, the way Polylang for WooCommerce makes them.
+		wp_mkdir_p( WPMU_PLUGIN_DIR );
+		$out['mu_plugin'] = (bool) file_put_contents(
+			WPMU_PLUGIN_DIR . '/e2e-polylang-products.php',
+			"<?php\nadd_filter( 'pll_get_post_types', function ( \$types ) { return \$types + array( 'product' => 'product' ); } );\n"
+		);
+		break;
+
+	case 'lang_products':
+		$out['default']    = pll_default_language();
+		$out['languages']  = pll_languages_list();
+		$out['translated'] = pll_is_translated_post_type( 'product' );
+		$out['no_language'] = pll_get_post_language( wc_get_product_id_by_sku( 'CBL-001' ) );
+		// Translations made the WPML way: separate posts, "-el"/"-ru" SKUs or the original's SKU.
+		add_filter( 'wc_product_has_unique_sku', '__return_false' );
+		$cup    = make_simple( 'Coffee Cup', 'CCAF 011', '10', 7 );
+		$cup_el = make_simple( 'Κούπα καφέ', 'CCAF 011-el', '10', 7 );
+		$cup_ru = make_simple( 'Кофейная чашка', 'CCAF 011-ru', '10', 7 );
+		$tea    = make_simple( 'Green Tea', 'TEA-1', '5', 8 );
+		$tea_el = make_simple( 'Πράσινο τσάι', 'TEA-1', '9', 8 );
+		$mug    = make_variable( 'Travel Mug', 'TMUG', array( 'Black' => 'TMUG-BLK', 'White' => 'TMUG-WHT' ) );
+		$mug_el = make_variable( 'Κούπα ταξιδιού', 'TMUG-el', array( 'Black' => 'TMUG-BLK-el', 'White' => 'TMUG-WHT' ) );
+		remove_filter( 'wc_product_has_unique_sku', '__return_false' );
+		foreach ( array( $cup => 'en', $cup_el => 'el', $cup_ru => 'ru', $tea => 'en', $tea_el => 'el', $mug => 'en', $mug_el => 'el' ) as $id => $lang ) {
+			pll_set_post_language( $id, $lang );
+		}
+		pll_save_post_translations( array( 'en' => $cup, 'el' => $cup_el, 'ru' => $cup_ru ) );
+		pll_save_post_translations( array( 'en' => $tea, 'el' => $tea_el ) );
+		pll_save_post_translations( array( 'en' => $mug, 'el' => $mug_el ) );
+		$out['queued'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		// The translations were queued on save, before they had a language: the flush skips them.
+		Fetch_WC_Product_Sync::flush();
+		$ids = compact( 'cup', 'cup_el', 'cup_ru', 'tea', 'tea_el', 'mug', 'mug_el' );
+		update_option( 'e2e_lang_ids', $ids, false );
+		$out['ids'] = $ids;
+		$out['translation_status'] = array( get_post_meta( $cup_el, '_fetch_sync_status', true ), get_post_meta( $tea_el, '_fetch_sync_status', true ) );
+		// Editing a translation (price, stock) sends nothing.
+		$el = wc_get_product( $cup_el );
+		$el->set_regular_price( '12' );
+		$el->save();
+		wc_update_product_stock( $tea_el, 3 );
+		$out['pending_after_translation_edit'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		wc_update_product_stock( $tea_el, 8 );
+		// WPML / WCML copy custom fields to translations: the copy must not confuse orders or deletes.
+		foreach ( array( '_fetch_ref', '_fetch_product_id' ) as $key ) {
+			update_post_meta( $tea_el, $key, get_post_meta( $tea, $key, true ) );
+		}
+		delete_option( Fetch_WC_Product_Sync::PENDING_OPTION );
+		break;
+
+	case 'lang_preview':
+		// The merchant browses wp-admin with Polylang's language filter on Greek.
+		update_user_meta( 1, 'pll_filter_content', 'el' );
+		$out['is_admin'] = is_admin();
+		$out['notice']   = post_action( 'mirror_preview' );
+		$out['preview']  = get_transient( 'fetch_wc_mirror_preview_' . get_current_user_id() );
+		delete_user_meta( 1, 'pll_filter_content' );
+		break;
+
+	case 'lang_mirror':
+		$out['notice'] = save_settings( array( 'catalogue_mode' => 'mirror' ) );
+		run_full_sync();
+		$out['log']     = recent_log();
+		$out['pending'] = Fetch_WC_Mirror::pending();
+		save_settings( array( 'catalogue_mode' => 'add_update' ) );
+		break;
+
+	case 'lang_order_info':
+		$ids   = get_option( 'e2e_lang_ids' );
+		$order = Fetch_WC_Order_Sync::find( (string) $_GET['order'] );
+		$out['items'] = array();
+		foreach ( $order ? $order->get_items() : array() as $item ) {
+			$out['items'][] = array( 'name' => $item->get_name(), 'product_id' => $item->get_product_id(), 'qty' => $item->get_quantity() );
+		}
+		$out['ids']   = $ids;
+		$out['stock'] = array(
+			'tea'    => product_stock( $ids['tea'] ),
+			'tea_el' => product_stock( $ids['tea_el'] ),
+			'cup'    => product_stock( $ids['cup'] ),
+			'cup_el' => product_stock( $ids['cup_el'] ),
+		);
+		Fetch_WC_Product_Sync::flush();
+		break;
+
+	case 'lang_delete':
+		$ids = get_option( 'e2e_lang_ids' );
+		wp_trash_post( $ids['cup_el'] );
+		wp_delete_post( $ids['cup_ru'], true );
+		wp_delete_post( $ids['tea_el'], true ); // shares the SKU and carries the original's copied meta
+		$el_children = wc_get_product( $ids['mug_el'] )->get_children();
+		wp_delete_post( $el_children[1], true ); // the variation sharing "TMUG-WHT"
+		wc_get_product( $ids['mug_el'] )->delete( true );
+		$out['pending']       = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		$out['deactivations'] = array_keys( get_option( Fetch_WC_Product_Sync::DEACTIVATE_OPTION, array() ) );
+		Fetch_WC_Product_Sync::flush();
+		break;
+
+	case 'lang_readout':
+		$html            = render_page();
+		$out['help']     = false !== strpos( $html, 'Multilingual shops (WPML, Polylang) sync products in the default language only; translations are not sent to Fetch.' );
+		$out['readout']  = preg_match( '#<strong>(Synced language: [^<]+)</strong>#', $html, $m ) ? $m[1] : null;
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		deactivate_plugins( 'polylang/polylang.php' );
+		wp_delete_file( WPMU_PLUGIN_DIR . '/e2e-polylang-products.php' );
+		$out['deactivated'] = ! is_plugin_active( 'polylang/polylang.php' );
+		break;
+
+	case 'lang_after':
+		$html           = render_page();
+		$out['help']    = false !== strpos( $html, 'sync products in the default language only' );
+		$out['readout'] = false !== strpos( $html, 'Synced language:' );
 		break;
 
 	case 'render_box':
