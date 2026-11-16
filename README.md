@@ -11,6 +11,7 @@ It uses the [Fetch Partner API](https://developer.fetch.com.cy).
 - **Fetch orders as WooCommerce orders.** Each Fetch order appears in your normal Orders list, marked as paid on Fetch, and reduces your stock like any other order.
 - **Accept, mark ready or reject from WooCommerce.** A **Fetch** box on the order screen sends your decision straight to Fetch, which books the courier.
 - **Instant order alerts with a safety net.** Orders arrive within seconds through a signed webhook, and the plugin also checks every 2 minutes so nothing is missed.
+- **Optional 1:1 mirror.** With **Mirror this shop 1:1**, your Fetch store offers exactly what this shop sells: anything else is switched off on Fetch, never deleted.
 - **Optional auto-accept** with your usual preparation time.
 
 ## Requirements
@@ -44,6 +45,7 @@ It uses the [Fetch Partner API](https://developer.fetch.com.cy).
 | Client ID / Client secret | Your Partner API key. The secret is stored in your WordPress database and is never shown again after saving. |
 | Fetch store | The Fetch store your WooCommerce products and orders belong to. |
 | Sync to Fetch | Turns automatic product, price and stock sync on or off. |
+| Catalogue mode | **Add and update only** (default): products from this shop are added to Fetch and kept up to date; anything else in your Fetch store is left as it is. **Mirror this shop 1:1**: products in your Fetch store that aren't in this shop are switched off on Fetch (not deleted) at the end of every full sync. Prices and stock always follow this shop. **Preview** shows what would change first. See [Mirror this shop 1:1](#mirror-this-shop-11). |
 | Price markup (%) | 0–100, default 0. Added to every price and sale price sent to Fetch, e.g. 10 sends a €10.00 product as €11.00. Your WooCommerce prices are not changed. Changing it resends all products to Fetch automatically. |
 | Import Fetch orders | Turns order import on or off. |
 | Auto-accept | Accepts new Fetch orders automatically, using the preparation time below. |
@@ -91,6 +93,40 @@ The parent's description, brand, category and tags are shared by all of them.
 - Changes are collected and sent about 20 seconds after the last edit, in batches, so bulk edits and busy checkouts become a few API calls.
 - If Fetch cannot be reached, the products stay queued and are retried hourly.
 - Each product stores its last sync result in its `_fetch_sync_status` and `_fetch_sync_error` fields.
+
+### Mirror this shop 1:1
+
+With **Catalogue mode → Mirror this shop 1:1**, your Fetch store ends up offering exactly the products this shop syncs.
+
+- Every product this shop syncs is sent as usual: price (with your markup), stock and availability.
+- Every other listing in your Fetch store is **switched off** on Fetch (`isActive: false`), never deleted:
+  - listings with no reference, for example products added in the Fetch merchant portal;
+  - listings whose reference is not one of this shop's;
+  - listings for products this shop excludes: drafts, private or hidden products, and product types the plugin does not sync (grouped, external);
+  - listings for products you deleted.
+- Switching off is reversible.
+  A product that comes back is switched on again by the normal sync.
+- Names, photos and descriptions belong to Fetch's **shared catalogue**, which other stores use too, so they are not overwritten.
+  "1:1" means which products are on sale, and their price, stock and availability.
+
+**When it runs:** only at the end of a full sync, that is **Sync all products now** or the automatic resync after a price markup change.
+Single product edits handle their own product as before.
+
+**Safety checks:**
+
+| Check | What happens |
+|---|---|
+| The full sync could not reach Fetch for every product (connection or sign-in error) | The mirror step is skipped; nothing is switched off. Products Fetch rejected one by one do not count. |
+| Any page of your Fetch store's listings could not be read | The mirror step is aborted; nothing is switched off. |
+| The run would switch off more than half of your active Fetch products | Nothing is switched off. A notice in wp-admin asks you to confirm once with **Apply anyway**. If more products would be switched off by the time it runs, it asks again. |
+
+**Preview** (next to the setting) reads your Fetch store without changing anything and shows "N of M Fetch products would be switched off", with up to 20 names.
+Use it before you turn the mode on.
+
+Every run is logged under **Recent activity** with the number of Fetch products scanned, kept, switched off and any errors.
+
+Under the hood the plugin pages through `GET /api/v1/partner/stores/{storeId}/listings` (500 per page, following `nextCursor`), then sends `POST /api/v1/partner/stores/{storeId}/listings/batch` in requests of at most 200 rows and 450 KB.
+Each row is addressed by `listingId` and carries the listing's current `price`, which a live store requires, with `isActive: false`.
 
 ## How orders work
 
