@@ -6,7 +6,7 @@ Tested up to: 6.8
 Requires PHP: 7.4
 WC requires at least: 8.0
 WC tested up to: 9.9
-Stable tag: 1.1.0
+Stable tag: 1.1.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -61,6 +61,13 @@ Both run. The webhook delivers new orders in seconds and is verified with a sign
 WooCommerce → Fetch shows recent activity. The full log is under WooCommerce → Status → Logs, source "fetch". Each product also stores its last sync result.
 
 == Changelog ==
+
+= 1.1.1 =
+* Fix: large syncs are split into requests of at most 200 products and under 500 KB, the limits of a live Fetch store. A variable product with many variations no longer fails to sync.
+* Fix: deleting a product (or a single variation) now switches it off on a live Fetch store. Fetch needs the full product, price included; the plugin used to send only the name.
+* Fix: a failed product sync is retried for variable products too, and a failed switch-off is no longer dropped.
+* Fix: an order imported after Fetch had hidden the customer's details (Fetch does this 2 hours after the order) no longer shows "******"; the details are filled in when Fetch sends them, and real details are never replaced by hidden ones.
+* Fix: the webhook and the 2-minute poll can no longer create the same Fetch order twice when they arrive at the same moment.
 
 = 1.1.0 =
 * New: **Price markup (%)** setting. Adds a percentage to every price and sale price sent to Fetch without changing your WooCommerce prices. Changing it resends all products to Fetch automatically.

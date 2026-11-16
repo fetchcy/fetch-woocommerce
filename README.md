@@ -75,6 +75,7 @@ Fetch maintains the name, photos and category of shared catalogue products.
 | Stock (not managed) | Sold without a stock limit; **Out of stock** switches it off |
 | Published and visible in the catalogue | Active on Fetch |
 | Draft, private, hidden or trashed | Inactive on Fetch |
+| Permanently deleted (product or variation) | Inactive on Fetch |
 | Main image and gallery | Photos (set when the product is first created on Fetch) |
 | Category | Category path, matched against Fetch's categories |
 | Tags, brand, GTIN/EAN | Tags, brand, barcode |
@@ -154,6 +155,7 @@ The full log is under **WooCommerce → Status → Logs**, source `fetch`.
 - The plugin talks only to the Fetch API server you configure.
 - Your client secret and webhook signing secret are stored in the WordPress options table.
 - Customer details on imported orders come from Fetch and are stored like any other WooCommerce order.
+  Fetch hides a customer's name, phone and address 2 hours after the order; an order imported after that shows "Fetch customer", and the details are filled in if Fetch sends them later.
 - Uninstalling the plugin removes its settings.
   Orders and product data are kept.
 

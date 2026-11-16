@@ -3,7 +3,7 @@
  * Plugin Name:       Fetch for WooCommerce
  * Plugin URI:        https://developer.fetch.com.cy
  * Description:       Sell your WooCommerce catalogue on Fetch (fetch.com.cy). Products, prices and stock sync to Fetch automatically; Fetch orders arrive as WooCommerce orders you can accept, mark ready or reject.
- * Version:           1.1.0
+ * Version:           1.1.1
  * Requires at least: 6.3
  * Requires PHP:      7.4
  * Author:            Fetch
@@ -16,7 +16,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'FETCH_WC_VERSION', '1.1.0' );
+define( 'FETCH_WC_VERSION', '1.1.1' );
 define( 'FETCH_WC_FILE', __FILE__ );
 define( 'FETCH_WC_DIR', plugin_dir_path( __FILE__ ) );
 
