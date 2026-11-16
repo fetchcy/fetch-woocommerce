@@ -25,6 +25,7 @@ require_once FETCH_WC_DIR . 'includes/class-fetch-wc-logger.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-api.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-product-mapper.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-product-sync.php';
+require_once FETCH_WC_DIR . 'includes/class-fetch-wc-mirror.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-order-mapper.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-order-sync.php';
 require_once FETCH_WC_DIR . 'includes/class-fetch-wc-webhook.php';

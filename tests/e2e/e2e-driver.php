@@ -34,6 +34,7 @@ function save_settings( array $fields ) {
 			'auto_accept'     => $s['auto_accept'],
 			'prep_minutes'    => (string) $s['prep_minutes'],
 			'price_markup'    => (string) $s['price_markup'],
+			'catalogue_mode'  => $s['catalogue_mode'],
 			'_wpnonce'        => wp_create_nonce( Fetch_WC_Admin::ACTION ),
 		),
 		$fields
@@ -52,6 +53,52 @@ function save_settings( array $fields ) {
 	$notice = get_transient( 'fetch_wc_notice_' . get_current_user_id() );
 	delete_transient( 'fetch_wc_notice_' . get_current_user_id() );
 	return is_array( $notice ) ? $notice[1] : null;
+}
+
+/** Post one of the standalone forms (Preview, Apply anyway): action, nonce and "do" only. */
+function post_action( $do ) {
+	$_POST    = array(
+		'action'   => Fetch_WC_Admin::ACTION,
+		'do'       => $do,
+		'_wpnonce' => wp_create_nonce( Fetch_WC_Admin::ACTION ),
+	);
+	$_REQUEST = $_POST;
+	$redirect = static function ( $location ) {
+		throw new RuntimeException( $location );
+	};
+	add_filter( 'wp_redirect', $redirect );
+	try {
+		Fetch_WC_Admin::handle();
+	} catch ( RuntimeException $e ) {
+		// Redirected back to the settings page.
+	}
+	remove_filter( 'wp_redirect', $redirect );
+	$notice = get_transient( 'fetch_wc_notice_' . get_current_user_id() );
+	delete_transient( 'fetch_wc_notice_' . get_current_user_id() );
+	return is_array( $notice ) ? $notice[1] : null;
+}
+
+/** "Sync all products now", with its Action Scheduler pages run here, to the end. */
+function run_full_sync() {
+	save_settings( array( 'do' => 'bulk_sync' ) );
+	as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+	$n = count( wc_get_products( array( 'type' => array( 'simple', 'variable' ), 'status' => array( 'publish', 'private', 'draft' ), 'limit' => -1, 'return' => 'ids' ) ) );
+	for ( $page = 1; $page <= (int) ceil( $n / Fetch_WC_Product_Sync::CHUNK ) + 1; $page++ ) {
+		Fetch_WC_Product_Sync::bulk_page( $page ); // The last page is empty: that ends the sync.
+	}
+	as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+}
+
+function recent_log( $n = 8 ) {
+	return array_column( array_slice( Fetch_WC_Logger::activity(), 0, $n ), 'message' );
+}
+
+function render_page() {
+	require_once ABSPATH . 'wp-admin/includes/template.php';
+	ob_start();
+	Fetch_WC_Admin::notices();
+	Fetch_WC_Admin::render();
+	return ob_get_clean();
 }
 
 switch ( $step ) {
@@ -333,6 +380,83 @@ switch ( $step ) {
 		Fetch_WC_Order_Sync::unlock( (string) $_GET['order'], get_option( 'e2e_lock_token' ) );
 		delete_option( 'e2e_lock_token' );
 		$out['released'] = true;
+		break;
+
+	case 'mirror_off':
+		// A product type the plugin does not sync: its old Fetch listing is "excluded by the filter".
+		$ext = new WC_Product_External();
+		$ext->set_name( 'Gift card' );
+		$ext->set_sku( 'EXT-1' );
+		$ext->set_regular_price( '20' );
+		$ext->set_product_url( 'https://example.com/gift' );
+		$ext->set_status( 'publish' );
+		$ext->save();
+		Fetch_WC_Product_Sync::flush();
+		$out['mode'] = Fetch_WC_Settings::get( 'catalogue_mode' );
+		run_full_sync();
+		$out['log'] = recent_log();
+		break;
+
+	case 'mirror_preview':
+		$out['notice']  = post_action( 'mirror_preview' );
+		$out['preview'] = get_transient( 'fetch_wc_mirror_preview_' . get_current_user_id() );
+		$out['mode']    = Fetch_WC_Settings::get( 'catalogue_mode' );
+		$html           = render_page();
+		$out['html_has_count']  = 1 === preg_match( '/(\d+) of (\d+) Fetch products would be switched off\./', $html, $m );
+		$out['html_count']      = $m ? array( (int) $m[1], (int) $m[2] ) : null;
+		$out['html_samples']    = preg_match_all( '#<li>([^<]+)</li>#', substr( $html, (int) strpos( $html, 'id="fetch_wc_mirror_preview"' ) ), $li ) ? $li[1] : array();
+		$out['html_help']       = false !== strpos( $html, 'Products in your Fetch store that aren&#039;t in this shop will be switched off on Fetch (not deleted). Prices and stock always follow this shop.' );
+		$out['html_modes']      = preg_match_all( '/<option value="(add_update|mirror)"/', $html, $mm ) ? $mm[1] : array();
+		$out['html_preview_form'] = false !== strpos( $html, 'form="fetch_wc_mirror_preview_form"' ) && false !== strpos( $html, 'id="fetch_wc_mirror_preview_form"' );
+		break;
+
+	case 'mirror_on':
+		$out['notice'] = save_settings( array( 'catalogue_mode' => 'mirror' ) );
+		$out['mode']   = Fetch_WC_Settings::get( 'catalogue_mode' );
+		run_full_sync();
+		$out['log']     = recent_log();
+		$out['pending'] = Fetch_WC_Mirror::pending();
+		break;
+
+	case 'mirror_comeback':
+		// The shop starts selling a product whose listing the mirror switched off.
+		$back = new WC_Product_Simple();
+		$back->set_name( 'Returning Lamp' );
+		$back->set_sku( 'BACK-1' );
+		$back->set_regular_price( '15' );
+		$back->set_status( 'publish' );
+		$back->save();
+		Fetch_WC_Product_Sync::flush();
+		$out['synced'] = get_post_meta( $back->get_id(), '_fetch_sync_status', true );
+		run_full_sync();
+		$out['log'] = recent_log();
+		break;
+
+	case 'mirror_sync':
+		run_full_sync();
+		$out['log']     = recent_log();
+		$out['pending'] = Fetch_WC_Mirror::pending();
+		$html           = render_page();
+		$out['notice_shown'] = false !== strpos( $html, 'id="fetch_wc_mirror_notice"' );
+		$out['apply_button'] = false !== strpos( $html, 'value="mirror_apply"' );
+		$out['notice_text']  = preg_match( '/It would switch off (\d+) of your (\d+) active Fetch products/', $html, $m ) ? array( (int) $m[1], (int) $m[2] ) : null;
+		break;
+
+	case 'mirror_apply':
+		$out['notice']    = post_action( 'mirror_apply' );
+		$actions          = as_get_scheduled_actions( array( 'hook' => Fetch_WC_Mirror::HOOK, 'status' => ActionScheduler_Store::STATUS_PENDING, 'group' => Fetch_WC_Product_Sync::GROUP ) );
+		$out['scheduled'] = array_values( array_map( function ( $a ) { return $a->get_args(); }, $actions ) );
+		$out['pending_after_confirm'] = Fetch_WC_Mirror::pending();
+		as_unschedule_all_actions( Fetch_WC_Mirror::HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		// Run the confirmed action now instead of waiting for Action Scheduler.
+		foreach ( $out['scheduled'] as $args ) {
+			do_action_ref_array( Fetch_WC_Mirror::HOOK, array_values( $args ) );
+		}
+		$out['log']          = recent_log();
+		$out['pending']      = Fetch_WC_Mirror::pending();
+		$out['notice_shown'] = false !== strpos( render_page(), 'id="fetch_wc_mirror_notice"' );
+		save_settings( array( 'catalogue_mode' => 'add_update' ) );
+		$out['mode_after'] = Fetch_WC_Settings::get( 'catalogue_mode' );
 		break;
 
 	case 'render_box':
