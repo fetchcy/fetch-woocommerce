@@ -27,6 +27,7 @@ class Fetch_WC_Admin {
 
 	/** One-shot notices, from this page and from the order screen actions. */
 	public static function notices() {
+		self::mirror_notice();
 		$key    = 'fetch_wc_notice_' . get_current_user_id();
 		$notice = get_transient( $key );
 		if ( ! is_array( $notice ) || 2 !== count( $notice ) ) {
@@ -40,6 +41,35 @@ class Fetch_WC_Admin {
 			esc_html__( 'Fetch:', 'fetch-for-woocommerce' ),
 			esc_html( $message )
 		);
+	}
+
+	/** Shown on every admin screen until the merchant confirms or turns mirror mode off. */
+	private static function mirror_notice() {
+		$pending = Fetch_WC_Mirror::pending();
+		if ( ! $pending || ! Fetch_WC_Settings::mirror() || ! current_user_can( 'manage_woocommerce' ) ) {
+			return;
+		}
+		?>
+		<div class="notice notice-warning" id="fetch_wc_mirror_notice">
+			<p>
+				<strong><?php esc_html_e( 'Fetch:', 'fetch-for-woocommerce' ); ?></strong>
+				<?php
+				/* translators: 1: listings to switch off, 2: active listings */
+				echo esc_html( sprintf( __( '"Mirror this shop" was paused. It would switch off %1$d of your %2$d active Fetch products, more than half, so it waits for you to confirm. Nothing has been switched off yet.', 'fetch-for-woocommerce' ), (int) $pending['off'], (int) $pending['active'] ) );
+				?>
+			</p>
+			<?php if ( ! empty( $pending['samples'] ) ) : ?>
+				<p class="description"><?php echo esc_html( __( 'For example:', 'fetch-for-woocommerce' ) . ' ' . implode( ', ', array_slice( (array) $pending['samples'], 0, 5 ) ) ); ?></p>
+			<?php endif; ?>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<?php self::hidden( 'mirror_apply' ); ?>
+				<p>
+					<button type="submit" class="button button-primary" name="do" value="mirror_apply"><?php esc_html_e( 'Apply anyway', 'fetch-for-woocommerce' ); ?></button>
+					<a class="button" href="<?php echo esc_url( self::page_url() ); ?>"><?php esc_html_e( 'Review settings', 'fetch-for-woocommerce' ); ?></a>
+				</p>
+			</form>
+		</div>
+		<?php
 	}
 
 	private static function notice( $type, $message ) {
@@ -132,6 +162,8 @@ class Fetch_WC_Admin {
 					</tr>
 				</table>
 
+				<?php self::render_catalogue_mode( $s ); ?>
+
 				<h2><?php esc_html_e( 'Orders', 'fetch-for-woocommerce' ); ?></h2>
 				<table class="form-table" role="presentation">
 					<tr>
@@ -166,6 +198,10 @@ class Fetch_WC_Admin {
 
 				<?php submit_button( __( 'Save settings', 'fetch-for-woocommerce' ), 'primary', 'submit', true, array( 'value' => 'save' ) ); ?>
 			</form>
+			<?php // Its own form, so a preview neither saves nor needs the settings above. ?>
+			<form id="fetch_wc_mirror_preview_form" method="post" action="<?php echo esc_url( $url ); ?>">
+				<?php self::hidden( 'mirror_preview' ); ?>
+			</form>
 
 			<h2><?php esc_html_e( 'Recent activity', 'fetch-for-woocommerce' ); ?></h2>
 			<?php $activity = Fetch_WC_Logger::activity(); ?>
@@ -189,6 +225,67 @@ class Fetch_WC_Admin {
 		<?php
 	}
 
+	private static function render_catalogue_mode( array $s ) {
+		$mode    = Fetch_WC_Settings::sanitize_catalogue_mode( $s['catalogue_mode'] );
+		$preview = get_transient( 'fetch_wc_mirror_preview_' . get_current_user_id() );
+		?>
+		<h2 id="fetch_wc_catalogue"><?php esc_html_e( 'Catalogue', 'fetch-for-woocommerce' ); ?></h2>
+		<table class="form-table" role="presentation">
+			<tr>
+				<th scope="row"><label for="fetch_wc_catalogue_mode"><?php esc_html_e( 'Catalogue mode', 'fetch-for-woocommerce' ); ?></label></th>
+				<td>
+					<select id="fetch_wc_catalogue_mode" name="catalogue_mode">
+						<option value="add_update" <?php selected( $mode, 'add_update' ); ?>><?php esc_html_e( 'Add and update only', 'fetch-for-woocommerce' ); ?></option>
+						<option value="mirror" <?php selected( $mode, 'mirror' ); ?>><?php esc_html_e( 'Mirror this shop 1:1', 'fetch-for-woocommerce' ); ?></option>
+					</select>
+					<p class="description"><?php esc_html_e( 'Add and update only: products from this shop are added to Fetch and kept up to date. Anything else in your Fetch store is left as it is.', 'fetch-for-woocommerce' ); ?></p>
+					<p class="description"><?php esc_html_e( 'Mirror this shop 1:1: Products in your Fetch store that aren\'t in this shop will be switched off on Fetch (not deleted). Prices and stock always follow this shop.', 'fetch-for-woocommerce' ); ?></p>
+					<p class="description"><?php esc_html_e( 'It runs at the end of every full sync ("Sync all products now"). Product names, photos and descriptions come from Fetch\'s shared catalogue and are not overwritten: 1:1 means which products are on sale, their price, stock and availability. A product you bring back is switched on again by the next sync.', 'fetch-for-woocommerce' ); ?></p>
+					<p><button type="submit" form="fetch_wc_mirror_preview_form" class="button" name="do" value="mirror_preview" <?php disabled( ! Fetch_WC_Settings::is_connected() ); ?>><?php esc_html_e( 'Preview', 'fetch-for-woocommerce' ); ?></button></p>
+					<?php if ( is_array( $preview ) ) : ?>
+						<div id="fetch_wc_mirror_preview" class="notice notice-info inline" style="max-width:720px">
+							<?php if ( 'scan_failed' === $preview['status'] ) : ?>
+								<p><?php echo esc_html( __( 'Preview failed, could not read your Fetch store:', 'fetch-for-woocommerce' ) . ' ' . $preview['error'] ); ?></p>
+							<?php else : ?>
+								<p><strong>
+								<?php
+								/* translators: 1: listings to switch off, 2: active listings */
+								echo esc_html( sprintf( __( '%1$d of %2$d Fetch products would be switched off.', 'fetch-for-woocommerce' ), $preview['off'], $preview['active'] ) );
+								?>
+								</strong></p>
+								<p class="description">
+								<?php
+								/* translators: 1: listings scanned, 2: listings that match this shop, 3: date */
+								echo esc_html( sprintf( __( 'Your Fetch store has %1$d products; %2$d match products in this shop. Checked %3$s.', 'fetch-for-woocommerce' ), $preview['scanned'], $preview['kept'], wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $preview['time'] ) ) );
+								?>
+								</p>
+								<?php if ( $preview['samples'] ) : ?>
+									<ul style="list-style:disc;margin-left:20px">
+										<?php foreach ( $preview['samples'] as $name ) : ?>
+											<li><?php echo esc_html( $name ); ?></li>
+										<?php endforeach; ?>
+									</ul>
+									<?php if ( $preview['off'] > count( $preview['samples'] ) ) : ?>
+										<p class="description">
+										<?php
+										/* translators: %d: listings not shown */
+										echo esc_html( sprintf( __( '…and %d more.', 'fetch-for-woocommerce' ), $preview['off'] - count( $preview['samples'] ) ) );
+										?>
+										</p>
+									<?php endif; ?>
+								<?php endif; ?>
+								<?php if ( $preview['needs_confirmation'] ) : ?>
+									<p><?php esc_html_e( 'That is more than half of your active Fetch products, so the plugin will ask you to confirm before switching anything off.', 'fetch-for-woocommerce' ); ?></p>
+								<?php endif; ?>
+							<?php endif; ?>
+						</div>
+					<?php endif; ?>
+				</td>
+			</tr>
+		</table>
+		<?php
+	}
+
 	private static function hidden( $do ) {
 		echo '<input type="hidden" name="action" value="' . esc_attr( self::ACTION ) . '">';
 		wp_nonce_field( self::ACTION );
@@ -200,7 +297,12 @@ class Fetch_WC_Admin {
 			wp_die( esc_html__( 'You are not allowed to change these settings.', 'fetch-for-woocommerce' ) );
 		}
 
-		$do            = isset( $_POST['do'] ) ? sanitize_key( wp_unslash( $_POST['do'] ) ) : 'save';
+		$do = isset( $_POST['do'] ) ? sanitize_key( wp_unslash( $_POST['do'] ) ) : 'save';
+		if ( 'mirror_preview' === $do || 'mirror_apply' === $do ) {
+			'mirror_preview' === $do ? self::mirror_preview() : self::mirror_apply();
+			wp_safe_redirect( self::page_url() . ( 'mirror_preview' === $do ? '#fetch_wc_catalogue' : '' ) );
+			exit;
+		}
 		$markup_resync = self::save( $_POST );
 
 		switch ( $do ) {
@@ -249,6 +351,7 @@ class Fetch_WC_Admin {
 			'auto_accept'     => 'yes' === $get( 'auto_accept' ) ? 'yes' : 'no',
 			'prep_minutes'    => max( 0, min( 180, (int) $get( 'prep_minutes' ) ) ),
 			'price_markup'    => Fetch_WC_Settings::sanitize_markup( $get( 'price_markup' ) ),
+			'catalogue_mode'  => Fetch_WC_Settings::sanitize_catalogue_mode( $get( 'catalogue_mode' ) ),
 		);
 
 		$secret = isset( $post['client_secret'] ) ? trim( (string) wp_unslash( $post['client_secret'] ) ) : '';
@@ -287,6 +390,12 @@ class Fetch_WC_Admin {
 		}
 
 		Fetch_WC_Settings::update( $new );
+		if ( 'mirror' !== $new['catalogue_mode'] ) {
+			delete_option( Fetch_WC_Mirror::PENDING_OPTION );
+		}
+		if ( $new['catalogue_mode'] !== Fetch_WC_Settings::sanitize_catalogue_mode( $old['catalogue_mode'] ) ) {
+			Fetch_WC_Logger::info( 'mirror' === $new['catalogue_mode'] ? 'Catalogue mode: mirror this shop 1:1 (applies at the end of the next full sync).' : 'Catalogue mode: add and update only.' );
+		}
 
 		// Every Fetch price depends on the markup, so resend the catalogue when it changes.
 		$old_markup = Fetch_WC_Settings::sanitize_markup( $old['price_markup'] );
@@ -296,6 +405,34 @@ class Fetch_WC_Admin {
 		Fetch_WC_Logger::info( sprintf( 'Price markup changed from %s%% to %s%%; resending all products.', $old_markup, $new['price_markup'] ) );
 		Fetch_WC_Product_Sync::start_bulk_sync();
 		return true;
+	}
+
+	private static function mirror_preview() {
+		if ( ! Fetch_WC_Settings::is_connected() ) {
+			return;
+		}
+		$result         = Fetch_WC_Mirror::preview();
+		$result['time'] = time();
+		set_transient( 'fetch_wc_mirror_preview_' . get_current_user_id(), $result, HOUR_IN_SECONDS );
+		if ( 'scan_failed' === $result['status'] ) {
+			self::notice( 'error', __( 'Preview failed:', 'fetch-for-woocommerce' ) . ' ' . $result['error'] );
+			return;
+		}
+		Fetch_WC_Logger::info( sprintf( 'Mirror preview: scanned %d Fetch products, %d would be kept, %d would be switched off.', $result['scanned'], $result['kept'], $result['off'] ) );
+		/* translators: 1: listings to switch off, 2: active listings */
+		self::notice( 'success', sprintf( __( 'Preview: %1$d of %2$d Fetch products would be switched off. Nothing was changed.', 'fetch-for-woocommerce' ), $result['off'], $result['active'] ) );
+	}
+
+	/** The merchant confirms a paused run once; it applies in the background. */
+	private static function mirror_apply() {
+		$pending = Fetch_WC_Mirror::pending();
+		if ( ! $pending || ! Fetch_WC_Settings::mirror() || ! Fetch_WC_Settings::is_connected() ) {
+			return;
+		}
+		delete_option( Fetch_WC_Mirror::PENDING_OPTION );
+		as_enqueue_async_action( Fetch_WC_Mirror::HOOK, array( 'up_to' => (int) $pending['off'] ), Fetch_WC_Product_Sync::GROUP );
+		Fetch_WC_Logger::info( sprintf( 'Mirror confirmed by %s: switching off up to %d Fetch products.', wp_get_current_user()->user_login, (int) $pending['off'] ) );
+		self::notice( 'success', __( 'Confirmed. The products are being switched off on Fetch; progress shows under Recent activity.', 'fetch-for-woocommerce' ) );
 	}
 
 	private static function connect() {

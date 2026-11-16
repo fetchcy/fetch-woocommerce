@@ -92,7 +92,7 @@ class Fetch_WC_Product_Mapper {
 					'ref'         => self::ref( $variation ),
 					'name'        => wp_strip_all_tags( $product->get_name() ) . ( '' !== $label ? ' – ' . $label : '' ),
 					'productType' => 'SIMPLE',
-					'isActive'    => $parent_active && 'publish' === $variation->get_status() && $variation->variation_is_visible(),
+					'isActive'    => $parent_active && self::variation_is_active( $variation ),
 				),
 				$base,
 				self::price_and_stock( $variation )
@@ -130,6 +130,29 @@ class Fetch_WC_Product_Mapper {
 			$out[] = $pair[0];
 		}
 		return $out;
+	}
+
+	/**
+	 * The refs a normal sync of this product sends as active: what "Mirror this
+	 * shop" keeps on Fetch. Cheaper than to_fetch_items (no prices or images).
+	 *
+	 * @return string[]
+	 */
+	public static function active_refs( $product ) {
+		if ( ! self::supports( $product ) || ! self::is_active( $product ) ) {
+			return array();
+		}
+		if ( ! $product->is_type( 'variable' ) ) {
+			return array( self::ref( $product ) );
+		}
+		$refs = array();
+		foreach ( $product->get_children() as $child_id ) {
+			$variation = wc_get_product( $child_id );
+			if ( $variation instanceof WC_Product_Variation && self::variation_is_active( $variation ) ) {
+				$refs[] = self::ref( $variation );
+			}
+		}
+		return $refs;
 	}
 
 	/** True once Fetch has accepted this product, or any of its variations. */
@@ -203,6 +226,10 @@ class Fetch_WC_Product_Mapper {
 
 	private static function is_active( WC_Product $product ) {
 		return 'publish' === $product->get_status() && 'hidden' !== $product->get_catalog_visibility();
+	}
+
+	private static function variation_is_active( WC_Product_Variation $variation ) {
+		return 'publish' === $variation->get_status() && $variation->variation_is_visible();
 	}
 
 	/** price / salePrice / stockCount for a simple product or a variation. */

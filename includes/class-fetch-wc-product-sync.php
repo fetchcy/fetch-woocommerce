@@ -18,6 +18,8 @@ class Fetch_WC_Product_Sync {
 	const DEACTIVATE_OPTION = 'fetch_wc_pending_deactivations';
 	const FLUSH_HOOK        = 'fetch_wc_flush_products';
 	const BULK_HOOK         = 'fetch_wc_bulk_sync';
+	/** Set when a page of the running full sync could not reach Fetch. */
+	const BULK_FAILED_OPTION = 'fetch_wc_bulk_failed';
 	const GROUP             = 'fetch-for-woocommerce';
 	const CHUNK             = 50;
 	const FLUSH_DELAY       = 20;
@@ -157,6 +159,7 @@ class Fetch_WC_Product_Sync {
 		if ( function_exists( 'as_unschedule_all_actions' ) ) {
 			as_unschedule_all_actions( self::BULK_HOOK, null, self::GROUP );
 		}
+		delete_option( self::BULK_FAILED_OPTION );
 		as_enqueue_async_action( self::BULK_HOOK, array( 'page' => 1 ), self::GROUP );
 		Fetch_WC_Logger::info( 'Full product sync started.' );
 	}
@@ -176,9 +179,14 @@ class Fetch_WC_Product_Sync {
 		);
 		if ( ! $ids ) {
 			Fetch_WC_Logger::info( 'Full product sync finished.' );
+			$failed = 'yes' === get_option( self::BULK_FAILED_OPTION );
+			delete_option( self::BULK_FAILED_OPTION );
+			Fetch_WC_Mirror::after_full_sync( $failed );
 			return;
 		}
-		self::sync_ids( $ids );
+		if ( ! self::sync_ids( $ids ) ) {
+			update_option( self::BULK_FAILED_OPTION, 'yes', false );
+		}
 		as_enqueue_async_action( self::BULK_HOOK, array( 'page' => $page + 1 ), self::GROUP );
 	}
 
@@ -285,7 +293,9 @@ class Fetch_WC_Product_Sync {
 	private static function send( array $items, array $products ) {
 		$store_id = (string) Fetch_WC_Settings::get( 'store_id' );
 		$api      = new Fetch_WC_Api();
-		$result   = $api->upsert_products( $store_id, $items, 'wc-' . md5( wp_json_encode( $items ) ) );
+		// Unique per request: the sandbox replays a repeated key without applying
+		// it, so a product switched off and then back on would stay off there.
+		$result   = $api->upsert_products( $store_id, $items, 'wc-' . wp_generate_uuid4() );
 
 		if ( ! Fetch_WC_Api::ok( $result ) ) {
 			$message = Fetch_WC_Api::error_message( $result );

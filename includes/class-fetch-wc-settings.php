@@ -28,6 +28,7 @@ class Fetch_WC_Settings {
 			'store_name'         => '',
 			'sync_products'      => 'yes',
 			'price_markup'       => 0,
+			'catalogue_mode'     => 'add_update',
 			'import_orders'      => 'yes',
 			'auto_accept'        => 'no',
 			'prep_minutes'       => 15,
@@ -82,6 +83,15 @@ class Fetch_WC_Settings {
 
 	public static function markup() {
 		return self::sanitize_markup( self::get( 'price_markup' ) );
+	}
+
+	/** "add_update" (default) or "mirror"; anything else is add_update. */
+	public static function sanitize_catalogue_mode( $raw ) {
+		return 'mirror' === (string) $raw ? 'mirror' : 'add_update';
+	}
+
+	public static function mirror() {
+		return 'mirror' === self::sanitize_catalogue_mode( self::get( 'catalogue_mode' ) );
 	}
 
 	public static function enabled( $key ) {

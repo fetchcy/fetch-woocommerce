@@ -229,6 +229,78 @@ try {
   o4 = await step('order_info', { order: 'ord-4' });
   ok('a new eventId for an order already imported is deduped by Fetch orderId', r.status === 200 && o4.count === 1, o4.count);
 
+  // --- 1.2.0: Mirror this shop 1:1 ---------------------------------------------------
+  const listingBatches = () => mockLog().requests.filter((r) => r.method === 'POST' && r.path.endsWith('/listings/batch'));
+  const listingScans = () => mockLog().requests.filter((r) => r.method === 'GET' && r.path.endsWith('/listings'));
+  const mockListings = async () => Object.fromEntries((await (await fetch(`${MOCK}/__listings`)).json()).map((l) => [l.listingId, l]));
+  const seedListings = (listings) => fetch(`${MOCK}/__seed-listings`, { method: 'POST', body: JSON.stringify({ listings }) });
+  const control = (what, body) => fetch(`${MOCK}/__${what}`, { method: 'POST', body: JSON.stringify(body) });
+  const sameSet = (a, b) => a.length === b.length && [...a].sort().join() === [...b].sort().join();
+  const FOREIGN = ['portal-1', 'other-1', 'ext-1', 'back-1'];
+  await seedListings([
+    { listingId: 'portal-1', name: 'Portal-only Candle', price: '4.00' }, // made in the merchant portal: no ref
+    { listingId: 'other-1', ref: 'OTHER-SHOP-1', name: 'Other Shop Item', price: '8.00' }, // a ref this shop does not have
+    { listingId: 'ext-1', ref: 'EXT-1', name: 'Gift card', price: '20.00' }, // an external product: excluded by the plugin
+    { listingId: 'back-1', ref: 'BACK-1', name: 'Returning Lamp', price: '17.85' }, // the shop sells it again later
+    { listingId: 'off-1', name: 'Already off', price: '1.00', isActive: false }, // already off: left alone
+  ]);
+  let b0 = listingBatches().length;
+  let s0 = listingScans().length;
+  const mOff = await step('mirror_off');
+  let L = await mockListings();
+  ok('mirror off (default): a full sync neither scans nor switches anything off', mOff.mode === 'add_update' && listingBatches().length === b0 && listingScans().length === s0 && FOREIGN.every((id) => L[id].isActive === true) && !mOff.log.some((m) => /Mirror/.test(m)), { mode: mOff.mode, log: mOff.log });
+
+  const activeNow = Object.values(L).filter((l) => l.isActive).length;
+  const mPrev = await step('mirror_preview');
+  ok('preview: "4 of N Fetch products would be switched off", on the settings page', mPrev.preview?.status === 'preview' && mPrev.preview.off === 4 && mPrev.preview.active === activeNow && JSON.stringify(mPrev.html_count) === JSON.stringify([4, activeNow]), { preview: mPrev.preview, html: mPrev.html_count, activeNow });
+  ok('preview lists the names that would be switched off', sameSet(mPrev.html_samples, ['Portal-only Candle', 'Other Shop Item', 'Gift card', 'Returning Lamp']), mPrev.html_samples);
+  ok('preview changes nothing: no switch-off, mirror mode not saved', listingBatches().length === b0 && mPrev.mode === 'add_update' && /^Preview: 4 of \d+ Fetch products would be switched off\. Nothing was changed\.$/.test(mPrev.notice || ''), mPrev);
+  ok('settings: catalogue mode select, help text, preview in its own form', JSON.stringify(mPrev.html_modes) === '["add_update","mirror"]' && mPrev.html_help && mPrev.html_preview_form, mPrev);
+
+  const countBefore = Object.keys(L).length;
+  b0 = listingBatches().length;
+  const mOn = await step('mirror_on');
+  const onRows = listingBatches().slice(b0).flatMap((r) => r.body.items);
+  L = await mockListings();
+  ok('mirror on: switches off exactly what this shop does not sell (no ref, foreign ref, excluded product)', mOn.mode === 'mirror' && sameSet(onRows.map((r) => r.listingId), FOREIGN) && FOREIGN.every((id) => L[id].isActive === false), { mode: mOn.mode, onRows });
+  ok('switch-off rows: by listingId, current price, isActive false', onRows.length > 0 && onRows.every((r) => Object.keys(r).sort().join() === 'isActive,listingId,price' && r.isActive === false) && onRows.find((r) => r.listingId === 'other-1')?.price === '8.00' && L['other-1'].price === '8.00', onRows);
+  ok('the shop\'s own products stay on; listings already off are not touched', L['lst-CBL-001']?.isActive === true && Object.values(L).filter((l) => /^Big Pack/.test(l.name) && l.isActive).length === 209 && !onRows.some((r) => r.listingId === 'off-1'), L['lst-CBL-001']);
+  ok('nothing is deleted on Fetch', Object.keys(L).length === countBefore, { before: countBefore, after: Object.keys(L).length });
+  ok('mirror run logged: scanned, kept, switched off, errors', mOn.log.some((m) => /^Mirror finished: scanned \d+ Fetch products, kept \d+, switched off 4, 0 errors\.$/.test(m)) && mOn.pending === null, mOn.log);
+
+  b0 = listingBatches().length;
+  const mBack = await step('mirror_comeback');
+  L = await mockListings();
+  ok('a product that comes back is switched on again by the normal sync, and the mirror keeps it', mBack.synced === 'synced' && L['back-1'].isActive === true && !listingBatches().slice(b0).some((r) => r.body.items.some((i) => i.listingId === 'back-1')) && mBack.log.some((m) => /^Mirror finished: .*switched off 0, 0 errors\.$/.test(m)), { synced: mBack.synced, back: L['back-1'], log: mBack.log });
+
+  // 300 old listings: the store now spans two scan pages of 500, and the run would switch off more than half.
+  await seedListings(Array.from({ length: 300 }, (_, i) => ({ listingId: `bulk-${String(i).padStart(3, '0')}`, name: `Old item ${i}`, price: '2.00' })));
+  await control('fail-listings-page', { page: 2 });
+  b0 = listingBatches().length;
+  s0 = listingScans().length;
+  const mFail = await step('mirror_sync');
+  await control('fail-listings-page', { page: 0 });
+  ok('a scan page failing (page 2 of 2) aborts the mirror: nothing switched off', listingScans().length - s0 === 2 && listingBatches().length === b0 && mFail.pending === null && mFail.log.some((m) => /^Mirror aborted, nothing was switched off: .*page 2: HTTP 500/.test(m)), { scans: listingScans().length - s0, log: mFail.log });
+
+  await control('fail-puts', { fail: true });
+  s0 = listingScans().length;
+  const mPush = await step('mirror_sync');
+  await control('fail-puts', { fail: false });
+  ok('a full sync that could not reach Fetch skips the mirror: no scan, nothing switched off', listingScans().length === s0 && listingBatches().length === b0 && mPush.log.some((m) => /^Mirror skipped/.test(m)), mPush.log);
+
+  const mGuard = await step('mirror_sync');
+  ok('over 50%: paused, nothing switched off, logged', listingBatches().length === b0 && mGuard.pending?.off === 300 && mGuard.log.some((m) => /^Mirror paused: it would switch off 300 of \d+ active Fetch products, more than half/.test(m)), { pending: mGuard.pending, log: mGuard.log });
+  ok('admin notice asks to confirm, with "Apply anyway"', mGuard.notice_shown && mGuard.apply_button && mGuard.notice_text?.[0] === 300 && mGuard.notice_text[1] === mGuard.pending.active, mGuard);
+
+  const mApply = await step('mirror_apply');
+  const applyBatches = listingBatches().slice(b0);
+  L = await mockListings();
+  ok('"Apply anyway" queues one confirmed run for 300', JSON.stringify(mApply.scheduled) === '[{"up_to":300}]' && mApply.pending_after_confirm === null && /^Confirmed\./.test(mApply.notice || ''), mApply);
+  ok('it switches off all 300 in batches of at most 200 (200 + 100)', JSON.stringify(applyBatches.map((r) => r.body.items.length)) === '[200,100]' && Object.values(L).filter((l) => /^bulk-/.test(l.listingId) && !l.isActive).length === 300, applyBatches.map((r) => r.body.items.length));
+  ok('each switch-off request has its own idempotency key', applyBatches.every((r) => r.idem) && new Set(applyBatches.map((r) => r.idem)).size === applyBatches.length, applyBatches.map((r) => r.idem));
+  ok('notice cleared and the run logged', !mApply.notice_shown && mApply.pending === null && mApply.log.some((m) => /^Mirror finished: .*switched off 300, 0 errors\.$/.test(m)) && mApply.mode_after === 'add_update', mApply.log);
+  ok('mirror requests pass the live rules (≤200 rows, ≤500 KB, price on every row, limit ≤500)', mockLog().problems.length === 0 && listingScans().every((r) => r.query.limit === '500'), mockLog().problems);
+
   const srv = await step('server');
   ok('server select offers Production, Staging, Custom URL', JSON.stringify(srv.options) === '["production","staging","custom"]' && srv.help === true, srv);
   ok('existing "custom" server kept, its URL field shown', srv.custom_url_kept === 'http://127.0.0.1:9099' && srv.custom_shown === true, srv);

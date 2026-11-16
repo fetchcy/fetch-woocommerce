@@ -16,6 +16,7 @@ class Fetch_WC_Plugin {
 		}
 
 		Fetch_WC_Product_Sync::init();
+		Fetch_WC_Mirror::init();
 		Fetch_WC_Order_Sync::init();
 		Fetch_WC_Webhook::init();
 		Fetch_WC_Order_Actions::init();

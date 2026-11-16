@@ -40,6 +40,14 @@ class Fetch_WC_Api {
 		return $this->partner( 'PUT', 'stores/' . rawurlencode( $store_id ) . '/products', array( 'products' => $products ), array(), $idempotency_key );
 	}
 
+	public function list_listings( $store_id, array $query = array() ) {
+		return $this->partner( 'GET', 'stores/' . rawurlencode( $store_id ) . '/listings', null, $query );
+	}
+
+	public function batch_listings( $store_id, array $items, $idempotency_key = null ) {
+		return $this->partner( 'POST', 'stores/' . rawurlencode( $store_id ) . '/listings/batch', array( 'items' => $items ), array(), $idempotency_key );
+	}
+
 	public function list_orders( $store_id, array $query = array() ) {
 		return $this->partner( 'GET', 'stores/' . rawurlencode( $store_id ) . '/orders', null, $query );
 	}

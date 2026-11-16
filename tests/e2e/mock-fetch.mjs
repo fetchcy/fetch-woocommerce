@@ -1,6 +1,7 @@
 // Minimal mock of the Fetch Partner API for the e2e test. Records every request.
-// Applies the live PUT /products rules: price on every row, at most 200 rows
-// and 500 KB per request.
+// Applies the live PUT /products and listings/batch rules: price on every row,
+// at most 200 rows and 500 KB per request. Keeps the store's listings so
+// GET /listings pages through what PUT /products and listings/batch wrote.
 import http from 'node:http';
 import fs from 'node:fs';
 
@@ -10,6 +11,19 @@ const STORE = 'store-1';
 const requests = [];
 const orders = new Map(); // orderId → order
 const problems = [];
+const listings = new Map(); // listingId → listing, in insertion order
+let failListingsPage = 0; // 1-based page of GET /listings to answer 500, 0 = none
+let failPuts = false; // PUT /products answers 503 (Fetch unreachable)
+let clock = Date.parse('2026-01-01T00:00:00Z');
+const tick = () => new Date((clock += 1000)).toISOString();
+const byRef = (ref) => [...listings.values()].find((l) => l.ref === ref);
+function upsertListing(p) {
+  const l = byRef(p.ref) || { listingId: `lst-${p.ref}`, productId: `prod-${p.ref}`, variantId: null, ref: p.ref, barcode: null, sku: null, categoryPath: [], salePrice: null, saleEndsAt: null, currency: 'EUR', stockCount: null, trackStock: false };
+  Object.assign(l, { name: p.name, price: p.price, salePrice: p.salePrice ?? null, isActive: p.isActive !== false, updatedAt: tick() });
+  if (p.stockCount !== undefined) Object.assign(l, { stockCount: p.stockCount, trackStock: true });
+  listings.set(l.listingId, l);
+  return l;
+}
 
 const money = (v) => typeof v === 'string' && /^\d+\.\d{2}$/.test(v);
 function validateProduct(p, i) {
@@ -47,18 +61,67 @@ const server = http.createServer((req, res) => {
     // Test control (no auth): seed an order / force a status.
     if (req.method === 'POST' && p === '/__seed-order') { orders.set(body.orderId, body); return send(res, 200, { ok: true }); }
     if (req.method === 'POST' && p === '/__set-status') { const o = orders.get(body.orderId); if (o) o.status = body.status; return send(res, 200, o || {}); }
+    // Listings the shop never sent: made in the portal (no ref) or by another integration.
+    if (req.method === 'POST' && p === '/__seed-listings') {
+      for (const x of body.listings) listings.set(x.listingId, { productId: `prod-${x.listingId}`, variantId: null, ref: null, barcode: null, sku: null, categoryPath: [], salePrice: null, saleEndsAt: null, currency: 'EUR', stockCount: null, trackStock: false, isActive: true, ...x, updatedAt: tick() });
+      return send(res, 200, { count: listings.size });
+    }
+    if (req.method === 'POST' && p === '/__fail-listings-page') { failListingsPage = Number(body.page) || 0; return send(res, 200, { failListingsPage }); }
+    if (req.method === 'POST' && p === '/__fail-puts') { failPuts = !!body.fail; return send(res, 200, { failPuts }); }
+    if (req.method === 'GET' && p === '/__listings') return send(res, 200, [...listings.values()]);
+    if (req.method === 'POST' && p === '/__reset-listings') { listings.clear(); return send(res, 200, { ok: true }); }
     if (req.headers.authorization !== 'Bearer tok-1') return send(res, 401, { message: 'Unauthorized' });
 
     if (req.method === 'GET' && p === '/api/v1/partner/stores') return send(res, 200, { data: [{ id: STORE, name: 'Mock Shop', city: 'Nicosia', isActive: true }] });
 
     if (req.method === 'PUT' && p === `/api/v1/partner/stores/${STORE}/products`) {
+      if (failPuts) return send(res, 503, { message: 'Service unavailable' });
       const list = body?.products || [];
       if (list.length > 200) problems.push(`PUT /products with ${list.length} products (live max 200)`);
       if (Buffer.byteLength(raw) > 500 * 1024) problems.push(`PUT /products body ${Buffer.byteLength(raw)} bytes (max 500 KB)`);
       list.forEach(validateProduct);
       fs.writeFileSync(LOG, JSON.stringify({ requests, problems }, null, 2));
-      const results = list.map((x, i) => ({ ref: x.ref, productId: `prod-${x.ref}`, status: 'created', matchedBy: null }));
+      const results = list.map((x) => { const l = upsertListing(x); return { ref: x.ref, productId: l.productId, listingId: l.listingId, status: 'created', matchedBy: null }; });
       return send(res, 200, { created: results.length, updated: 0, rejected: 0, results });
+    }
+
+    // Keyset-paged like live: ordered by (updatedAt, id), limit max 500, nextCursor until null.
+    if (req.method === 'GET' && p === `/api/v1/partner/stores/${STORE}/listings`) {
+      const limit = Number(url.searchParams.get('limit') || 200);
+      if (limit > 500) problems.push(`GET /listings limit=${limit} (max 500)`);
+      const cursor = url.searchParams.get('cursor');
+      const after = cursor ? JSON.parse(Buffer.from(cursor, 'base64url').toString()) : null;
+      const page = after ? after.page + 1 : 1;
+      if (failListingsPage && page === failListingsPage) return send(res, 500, { message: 'Internal server error' });
+      const sorted = [...listings.values()].sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.listingId.localeCompare(b.listingId));
+      const rest = after ? sorted.filter((l) => l.updatedAt > after.k || (l.updatedAt === after.k && l.listingId > after.id)) : sorted;
+      const data = rest.slice(0, Math.min(limit, 500));
+      const last = data.at(-1);
+      const nextCursor = rest.length > data.length && last ? Buffer.from(JSON.stringify({ k: last.updatedAt, id: last.listingId, page })).toString('base64url') : null;
+      return send(res, 200, { data, nextCursor });
+    }
+
+    if (req.method === 'POST' && p === `/api/v1/partner/stores/${STORE}/listings/batch`) {
+      const list = body?.items || [];
+      if (!req.headers['idempotency-key']) problems.push('listings/batch without Idempotency-Key');
+      if (list.length > 200) problems.push(`listings/batch with ${list.length} rows (live max 200)`);
+      if (Buffer.byteLength(raw) > 500 * 1024) problems.push(`listings/batch body ${Buffer.byteLength(raw)} bytes (max 500 KB)`);
+      const results = list.map((x, i) => {
+        const at = `items[${i}]`;
+        if (x.price === undefined) problems.push(`${at}.price missing (required on a live store)`);
+        else if (!money(x.price)) problems.push(`${at}.price not 2-decimal string: ${x.price}`);
+        const given = [x.listingId, x.ref, x.barcode].filter(Boolean);
+        if (given.length !== 1) return { ref: x.ref ?? null, listingId: x.listingId ?? null, status: 'error', code: given.length ? 'ambiguous_ref' : 'ref_not_found', message: 'Provide exactly one of listingId, ref or barcode' };
+        const l = x.listingId ? listings.get(x.listingId) : byRef(x.ref);
+        if (!l) return { ref: x.ref ?? null, listingId: x.listingId ?? null, status: 'error', code: 'ref_not_found', message: 'No listing matches this reference in this store' };
+        if (x.price === undefined) return { ref: l.ref, listingId: l.listingId, status: 'error', code: 'price_required', message: 'price is required' };
+        for (const k of ['price', 'salePrice', 'stockCount', 'isActive']) if (x[k] !== undefined) l[k] = x[k];
+        l.updatedAt = tick();
+        return { ref: l.ref, listingId: l.listingId, status: 'updated' };
+      });
+      fs.writeFileSync(LOG, JSON.stringify({ requests, problems }, null, 2));
+      const rejected = results.filter((r) => r.status === 'error').length;
+      return send(res, rejected === results.length && results.length ? 422 : rejected ? 207 : 200, { accepted: results.length - rejected, rejected, results });
     }
 
     if (req.method === 'GET' && p === `/api/v1/partner/stores/${STORE}/orders`) return send(res, 200, { data: [...orders.values()], nextCursor: null });

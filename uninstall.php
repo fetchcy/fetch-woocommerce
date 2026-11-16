@@ -13,6 +13,8 @@ foreach ( array(
 	'fetch_wc_activity',
 	'fetch_wc_pending_products',
 	'fetch_wc_pending_deactivations',
+	'fetch_wc_bulk_failed',
+	'fetch_wc_mirror_pending',
 	'fetch_wc_seen_events',
 ) as $option ) {
 	delete_option( $option );
