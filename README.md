@@ -44,7 +44,7 @@ It uses the [Fetch Partner API](https://developer.fetch.com.cy).
 | Server | **Production** (`https://api.fetch.com.cy`, the default). Live keys, and sandbox keys Fetch issues for testing, both use Production: your key decides whether you see test data. **Staging** (`https://api-stg.fetch.com.cy`) only for keys Fetch has moved to staging. **Custom URL** only if Fetch gives you a different address. Changing the server signs in again and asks you to pick your store again. |
 | Client ID / Client secret | Your Partner API key. The secret is stored in your WordPress database and is never shown again after saving. |
 | Fetch store | The Fetch store your WooCommerce products and orders belong to. |
-| Sync to Fetch | Turns automatic product, price and stock sync on or off. |
+| Sync to Fetch | Turns automatic product, price and stock sync on or off. Multilingual shops (WPML, Polylang) sync products in the default language only; see [Multilingual shops](#multilingual-shops). |
 | Catalogue mode | **Add and update only** (default): products from this shop are added to Fetch and kept up to date; anything else in your Fetch store is left as it is. **Mirror this shop 1:1**: products in your Fetch store that aren't in this shop are switched off on Fetch (not deleted) at the end of every full sync. Prices and stock always follow this shop. **Preview** shows what would change first. See [Mirror this shop 1:1](#mirror-this-shop-11). |
 | Price markup (%) | 0–100, default 0. Added to every price and sale price sent to Fetch, e.g. 10 sends a €10.00 product as €11.00. Your WooCommerce prices are not changed. Changing it resends all products to Fetch automatically. |
 | Import Fetch orders | Turns order import on or off. |
@@ -81,6 +81,23 @@ Fetch maintains the name, photos and category of shared catalogue products.
 | Main image and gallery | Photos (set when the product is first created on Fetch) |
 | Category | Category path, matched against Fetch's categories |
 | Tags, brand, GTIN/EAN | Tags, brand, barcode |
+
+### Multilingual shops
+
+With **WPML** (with or without WooCommerce Multilingual) or **Polylang**, each translation is a separate WooCommerce product, often with its own SKU (`CCAF 011-el`) or the original's.
+The plugin syncs only products in your site's **default language**, with their variations, and skips translations everywhere:
+
+- the full sync (**Sync all products now**) and the resync after a markup change;
+- product saves and stock changes;
+- deleting or trashing: removing a translation never switches off the original, even when they share a SKU;
+- **Mirror this shop 1:1** and its **Preview**: listings that came from translations are not kept, so they are switched off like any other listing this shop does not sell.
+
+Products with no language assigned count as default-language.
+Fetch orders are matched to the default-language product, so stock is reduced on the original (WPML usually syncs stock across translations anyway).
+**WooCommerce → Fetch** shows the synced language, for example "Synced language: English (default)".
+The language comes from the plugins' public APIs (`wpml_default_language` and `wpml_element_language_details`, or `pll_default_language()` and `pll_get_post_language()`); without either plugin nothing changes.
+
+**TranslatePress** and **Weglot** keep translations inside the original product, so they need nothing.
 
 ### Variable products
 
