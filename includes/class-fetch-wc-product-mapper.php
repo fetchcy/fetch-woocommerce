@@ -2,7 +2,8 @@
 /**
  * WooCommerce product → Fetch `PUT /stores/{storeId}/products` item.
  *
- * Fetch prices are what the customer pays, VAT included, as decimal strings.
+ * Fetch prices are what the customer pays, VAT included, as decimal strings,
+ * plus the merchant's optional price markup.
  * A product's ref is its SKU (or "wc-<id>" without one), frozen in post meta on
  * first sync so a later SKU edit updates the same Fetch product instead of
  * creating a second one.
@@ -199,11 +200,12 @@ class Fetch_WC_Product_Mapper {
 	private static function price_and_stock( WC_Product $product ) {
 		$out     = array();
 		$regular = $product->get_regular_price( 'edit' );
+		$markup  = Fetch_WC_Settings::markup();
 		if ( '' !== $regular && null !== $regular ) {
-			$out['price'] = self::money( wc_get_price_including_tax( $product, array( 'price' => (float) $regular ) ) );
+			$out['price'] = self::apply_markup( self::money( wc_get_price_including_tax( $product, array( 'price' => (float) $regular ) ) ), $markup );
 		}
 		if ( $product->is_on_sale( 'edit' ) && '' !== $product->get_sale_price( 'edit' ) ) {
-			$out['salePrice'] = self::money( wc_get_price_including_tax( $product, array( 'price' => (float) $product->get_sale_price( 'edit' ) ) ) );
+			$out['salePrice'] = self::apply_markup( self::money( wc_get_price_including_tax( $product, array( 'price' => (float) $product->get_sale_price( 'edit' ) ) ) ), $markup );
 		}
 
 		$stock = self::stock( $product );
@@ -320,6 +322,21 @@ class Fetch_WC_Product_Mapper {
 	private static function plain_text( $html ) {
 		$text = trim( preg_replace( '/\s+/u', ' ', wp_strip_all_tags( (string) $html ) ) );
 		return function_exists( 'mb_substr' ) ? mb_substr( $text, 0, 5000 ) : substr( $text, 0, 5000 );
+	}
+
+	/**
+	 * Adds a percentage markup to a VAT-inclusive 2-decimal price, rounding
+	 * half-up to the cent. Integer cent/basis-point maths, so 9.99 at 15%
+	 * (11.4885) is 11.49 rather than whatever the float lands on.
+	 */
+	public static function apply_markup( $price, $percent ) {
+		$cents = (int) round( (float) $price * 100 );
+		$bp    = (int) round( (float) $percent * 100 );
+		if ( $bp <= 0 ) {
+			return self::money( $cents / 100 );
+		}
+		$marked = intdiv( $cents * ( 10000 + $bp ) + 5000, 10000 );
+		return self::money( $marked / 100 );
 	}
 
 	public static function money( $amount ) {

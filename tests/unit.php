@@ -1,12 +1,15 @@
 <?php
 /**
  * Standalone unit tests (no WordPress): `php tests/unit.php`.
- * Covers webhook signature verification and the order mapping rules.
+ * Covers webhook signature verification, the order mapping rules and the
+ * price markup maths.
  */
 
 define( 'ABSPATH', __DIR__ . '/' );
 require __DIR__ . '/../includes/class-fetch-wc-order-mapper.php';
 require __DIR__ . '/../includes/class-fetch-wc-webhook.php';
+require __DIR__ . '/../includes/class-fetch-wc-settings.php';
+require __DIR__ . '/../includes/class-fetch-wc-product-mapper.php';
 
 $failures = 0;
 $passes   = 0;
@@ -106,6 +109,27 @@ $pickup = array(
 check( 'pickup', Fetch_WC_Order_Mapper::is_pickup( $pickup ), true );
 check( 'pickup null postcode → empty string', Fetch_WC_Order_Mapper::address( $pickup )['postcode'], '' );
 check( 'missing customer block', Fetch_WC_Order_Mapper::address( array() )['first_name'], 'Fetch' );
+
+// --- Price markup --------------------------------------------------------------
+check( 'markup 0% leaves the price alone', Fetch_WC_Product_Mapper::apply_markup( '10.00', 0 ), '10.00' );
+check( 'markup 10% on 10.00', Fetch_WC_Product_Mapper::apply_markup( '10.00', 10 ), '11.00' );
+check( 'markup 10% on 9.50', Fetch_WC_Product_Mapper::apply_markup( '9.50', 10 ), '10.45' );
+check( 'markup 12.5% on 10.00', Fetch_WC_Product_Mapper::apply_markup( '10.00', 12.5 ), '11.25' );
+check( 'markup 12.5% on 7.99 rounds half-up', Fetch_WC_Product_Mapper::apply_markup( '7.99', 12.5 ), '8.99' );
+check( 'markup 15% on 9.99 (11.4885) rounds half-up', Fetch_WC_Product_Mapper::apply_markup( '9.99', 15 ), '11.49' );
+check( 'markup 10% on 0.05 (0.055) rounds half-up', Fetch_WC_Product_Mapper::apply_markup( '0.05', 10 ), '0.06' );
+check( 'markup 100% doubles', Fetch_WC_Product_Mapper::apply_markup( '19.99', 100 ), '39.98' );
+check( 'markup on 0.00 stays 0.00', Fetch_WC_Product_Mapper::apply_markup( '0.00', 10 ), '0.00' );
+check( 'markup returns a decimal string', is_string( Fetch_WC_Product_Mapper::apply_markup( '10.00', 10 ) ), true );
+
+check( 'sanitize markup "10"', Fetch_WC_Settings::sanitize_markup( '10' ), 10.0 );
+check( 'sanitize markup "12,5"', Fetch_WC_Settings::sanitize_markup( '12,5' ), 12.5 );
+check( 'sanitize markup "15 %"', Fetch_WC_Settings::sanitize_markup( '15 %' ), 15.0 );
+check( 'sanitize markup blank → 0', Fetch_WC_Settings::sanitize_markup( '' ), 0.0 );
+check( 'sanitize markup garbage → 0', Fetch_WC_Settings::sanitize_markup( 'abc' ), 0.0 );
+check( 'sanitize markup negative → 0', Fetch_WC_Settings::sanitize_markup( '-5' ), 0.0 );
+check( 'sanitize markup above 100 → 100', Fetch_WC_Settings::sanitize_markup( '150' ), 100.0 );
+check( 'sanitize markup keeps 2 decimals', Fetch_WC_Settings::sanitize_markup( '7.456' ), 7.46 );
 
 echo "$passes passed, $failures failed\n";
 exit( $failures ? 1 : 0 );

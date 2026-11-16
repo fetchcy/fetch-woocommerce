@@ -22,6 +22,7 @@ class Fetch_WC_Settings {
 			'store_id'           => '',
 			'store_name'         => '',
 			'sync_products'      => 'yes',
+			'price_markup'       => 0,
 			'import_orders'      => 'yes',
 			'auto_accept'        => 'no',
 			'prep_minutes'       => 15,
@@ -54,6 +55,22 @@ class Fetch_WC_Settings {
 
 	public static function is_connected() {
 		return '' !== self::get( 'client_id' ) && '' !== self::get( 'client_secret' ) && '' !== self::get( 'store_id' );
+	}
+
+	/**
+	 * "Price markup (%)" input → a percentage in 0–100 with at most 2 decimals.
+	 * Accepts "12,5" and a trailing "%"; blank means 0; anything else non-numeric is 0.
+	 */
+	public static function sanitize_markup( $raw ) {
+		$value = str_replace( array( ',', '%', ' ' ), array( '.', '', '' ), trim( (string) $raw ) );
+		if ( '' === $value || ! is_numeric( $value ) ) {
+			return 0.0;
+		}
+		return round( max( 0.0, min( 100.0, (float) $value ) ), 2 );
+	}
+
+	public static function markup() {
+		return self::sanitize_markup( self::get( 'price_markup' ) );
 	}
 
 	public static function enabled( $key ) {

@@ -72,6 +72,21 @@ try {
   const last = puts2.at(-1)?.body.products.find((p) => p.ref === 'CBL-001');
   ok('stock change sends a second PUT with new stock', puts2.length > before && last?.stockCount === 6, { pending: st.pending, last });
 
+  const beforeMarkup = puts2.length;
+  const mk = await step('markup');
+  log = mockLog();
+  const puts3 = log.requests.filter((r) => r.method === 'PUT' && r.path.endsWith('/products')).slice(beforeMarkup);
+  const marked = puts3.flatMap((r) => r.body.products);
+  const mSimple = marked.find((p) => p.ref === 'CBL-001');
+  const mBlack = marked.find((p) => p.ref === 'CASE-BLACK');
+  ok('markup 10% saved through the settings form', mk.saved === 10 && /markup changed/.test(mk.notice || ''), mk);
+  ok('changing the markup queues a full product resync', mk.bulk_scheduled === true, mk);
+  ok('mock received marked-up price + sale price (9.50 → 10.45, 7.00 → 7.70)', mSimple?.price === '10.45' && mSimple?.salePrice === '7.70', mSimple);
+  ok('variation price marked up (12.00 → 13.20)', mBlack?.price === '13.20', mBlack);
+  ok('markup leaves WooCommerce prices unchanged', mk.wc_price === '9.5', mk.wc_price);
+  ok('saving the same markup does not resync', mk.same_bulk_scheduled === false && mk.same_notice === 'Settings saved.', mk);
+  ok('marked-up payloads pass mock validation', log.problems.length === 0, log.problems);
+
   // Seed a DRAFT order referencing the simple product's SKU, plus one unknown line.
   const order = {
     orderId: 'ord-1', orderNumber: '238400', storeId: 'store-1', status: 'DRAFT', placedAt: new Date().toISOString(), scheduledFor: null,
@@ -88,7 +103,7 @@ try {
   const o = polled.order || {};
   ok('poll imported the Fetch order', polled.found === true, polled);
   ok('imported order is on-hold (DRAFT)', o.status === 'on-hold' && o.fetch_status === 'DRAFT', o);
-  ok('line linked to WooCommerce product by SKU', o.items?.some((i) => i.product_id > 0 && i.qty === 2 && Number(i.total) === 14), o.items);
+  ok('line linked to WooCommerce product by SKU, at Fetch\'s price (no markup stripped)', o.items?.some((i) => i.product_id > 0 && i.qty === 2 && Number(i.total) === 14), o.items);
   ok('unknown line kept as a named line', o.items?.some((i) => i.product_id === 0 && i.name === 'Screen protector'), o.items);
   ok('shipping line + total match Fetch', o.shipping?.[0]?.total === '2.45' || Number(o.shipping?.[0]?.total) === 2.45 && Number(o.total) === 21.45, { shipping: o.shipping, total: o.total });
   ok('total equals Fetch total', Number(o.total) === 21.45, o.total);
