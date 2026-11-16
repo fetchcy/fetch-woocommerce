@@ -40,7 +40,7 @@ It uses the [Fetch Partner API](https://developer.fetch.com.cy).
 
 | Setting | What it does |
 |---|---|
-| Server | **Production** (`https://api.fetch.com.cy`) for live stores. **Custom URL** only if Fetch gives you a different address, for example for testing. |
+| Server | **Production** (`https://api.fetch.com.cy`, the default). Live keys, and sandbox keys Fetch issues for testing, both use Production: your key decides whether you see test data. **Staging** (`https://api-stg.fetch.com.cy`) only for keys Fetch has moved to staging. **Custom URL** only if Fetch gives you a different address. Changing the server signs in again and asks you to pick your store again. |
 | Client ID / Client secret | Your Partner API key. The secret is stored in your WordPress database and is never shown again after saving. |
 | Fetch store | The Fetch store your WooCommerce products and orders belong to. |
 | Sync to Fetch | Turns automatic product, price and stock sync on or off. |

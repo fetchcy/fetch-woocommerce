@@ -144,6 +144,13 @@ try {
   ok('badly signed webhook → 401', bad.status === 401, bad.status);
   const unsigned = await wpFetch(`${WP}/wp-json/fetch/v1/webhook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
   ok('unsigned webhook → 401', unsigned.status === 401, unsigned.status);
+
+  const srv = await step('server');
+  ok('server select offers Production, Staging, Custom URL', JSON.stringify(srv.options) === '["production","staging","custom"]' && srv.help === true, srv);
+  ok('existing "custom" server kept, its URL field shown', srv.custom_url_kept === 'http://127.0.0.1:9099' && srv.custom_shown === true, srv);
+  ok('switching to Staging uses api-stg and clears the cached token', srv.staging_url === 'https://api-stg.fetch.com.cy' && srv.token_before === true && srv.token_after === false, srv);
+  ok('Staging selected hides the custom URL field', srv.staging_selected === true && srv.custom_hidden === true, srv);
+  ok('unknown server value saves as Production', srv.garbage_saved_as === 'production' && srv.production_url === 'https://api.fetch.com.cy', srv);
 } catch (e) {
   console.error('E2E ERROR', e);
   results.push(['FAIL', 'runner error: ' + e.message]);

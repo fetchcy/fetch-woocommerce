@@ -64,6 +64,7 @@ WooCommerce â†’ Fetch shows recent activity. The full log is under WooCommerce â
 
 = 1.1.0 =
 * New: **Price markup (%)** setting. Adds a percentage to every price and sale price sent to Fetch without changing your WooCommerce prices. Changing it resends all products to Fetch automatically.
+* New: **Staging** server option (api-stg.fetch.com.cy) for keys Fetch has moved to staging. Sandbox keys keep using Production. The custom URL field now only shows when "Custom URL" is selected.
 
 = 1.0.0 =
 * First release: product, price and stock sync; order import with accept, ready and reject; signed webhooks with polling fallback.

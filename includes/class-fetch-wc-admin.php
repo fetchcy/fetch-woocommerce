@@ -66,12 +66,20 @@ class Fetch_WC_Admin {
 					<tr>
 						<th scope="row"><label for="fetch_wc_environment"><?php esc_html_e( 'Server', 'fetch-for-woocommerce' ); ?></label></th>
 						<td>
+							<?php $environment = Fetch_WC_Settings::sanitize_environment( $s['environment'] ); ?>
 							<select id="fetch_wc_environment" name="environment">
-								<option value="production" <?php selected( $s['environment'], 'production' ); ?>><?php esc_html_e( 'Production (api.fetch.com.cy)', 'fetch-for-woocommerce' ); ?></option>
-								<option value="custom" <?php selected( $s['environment'], 'custom' ); ?>><?php esc_html_e( 'Custom URL', 'fetch-for-woocommerce' ); ?></option>
+								<option value="production" <?php selected( $environment, 'production' ); ?>><?php esc_html_e( 'Production (api.fetch.com.cy)', 'fetch-for-woocommerce' ); ?></option>
+								<option value="staging" <?php selected( $environment, 'staging' ); ?>><?php esc_html_e( 'Staging (api-stg.fetch.com.cy)', 'fetch-for-woocommerce' ); ?></option>
+								<option value="custom" <?php selected( $environment, 'custom' ); ?>><?php esc_html_e( 'Custom URL', 'fetch-for-woocommerce' ); ?></option>
 							</select>
-							<p><input type="url" id="fetch_wc_custom_base_url" name="custom_base_url" class="regular-text" placeholder="https://" value="<?php echo esc_attr( $s['custom_base_url'] ); ?>">
-							<span class="description"><?php esc_html_e( 'Only used with "Custom URL".', 'fetch-for-woocommerce' ); ?></span></p>
+							<p class="description"><?php esc_html_e( 'Live keys, and sandbox keys Fetch issues for testing, both use Production. Your key decides whether you see test data.', 'fetch-for-woocommerce' ); ?></p>
+							<p class="description"><?php esc_html_e( 'Staging is only for keys Fetch has moved to staging.', 'fetch-for-woocommerce' ); ?></p>
+							<p id="fetch_wc_custom_base_url_row" <?php echo 'custom' === $environment ? '' : 'hidden'; ?>><input type="url" id="fetch_wc_custom_base_url" name="custom_base_url" class="regular-text" placeholder="https://" value="<?php echo esc_attr( $s['custom_base_url'] ); ?>"></p>
+							<script>
+								document.getElementById( 'fetch_wc_environment' ).addEventListener( 'change', function () {
+									document.getElementById( 'fetch_wc_custom_base_url_row' ).hidden = 'custom' !== this.value;
+								} );
+							</script>
 						</td>
 					</tr>
 					<tr>
@@ -232,9 +240,8 @@ class Fetch_WC_Admin {
 			return isset( $post[ $key ] ) ? sanitize_text_field( wp_unslash( $post[ $key ] ) ) : '';
 		};
 
-		$environment = $get( 'environment' );
-		$new         = array(
-			'environment'     => in_array( $environment, array( 'production', 'custom' ), true ) ? $environment : 'production',
+		$new = array(
+			'environment'     => Fetch_WC_Settings::sanitize_environment( $get( 'environment' ) ),
 			'custom_base_url' => esc_url_raw( $get( 'custom_base_url' ) ),
 			'client_id'       => $get( 'client_id' ),
 			'sync_products'   => 'yes' === $get( 'sync_products' ) ? 'yes' : 'no',

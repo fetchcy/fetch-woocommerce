@@ -9,8 +9,13 @@ class Fetch_WC_Settings {
 
 	const OPTION = 'fetch_wc_settings';
 
+	/**
+	 * Sandbox keys are issued on production too (the key, not the server,
+	 * decides test data), so staging is only for keys Fetch moved there.
+	 */
 	const ENVIRONMENTS = array(
 		'production' => 'https://api.fetch.com.cy',
+		'staging'    => 'https://api-stg.fetch.com.cy',
 	);
 
 	public static function defaults() {
@@ -45,12 +50,18 @@ class Fetch_WC_Settings {
 		update_option( self::OPTION, array_merge( self::all(), $values ), false );
 	}
 
+	/** "production", "staging" or "custom"; anything else is production. */
+	public static function sanitize_environment( $raw ) {
+		$env = (string) $raw;
+		return 'custom' === $env || isset( self::ENVIRONMENTS[ $env ] ) ? $env : 'production';
+	}
+
 	public static function base_url() {
-		$env = self::get( 'environment' );
+		$env = self::sanitize_environment( self::get( 'environment' ) );
 		if ( 'custom' === $env ) {
 			return untrailingslashit( (string) self::get( 'custom_base_url' ) );
 		}
-		return isset( self::ENVIRONMENTS[ $env ] ) ? self::ENVIRONMENTS[ $env ] : self::ENVIRONMENTS['production'];
+		return self::ENVIRONMENTS[ $env ];
 	}
 
 	public static function is_connected() {

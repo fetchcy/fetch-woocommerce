@@ -153,6 +153,32 @@ switch ( $step ) {
 		$out['wc_price']            = wc_get_product( wc_get_product_id_by_sku( 'CBL-001' ) )->get_regular_price( 'edit' );
 		break;
 
+	case 'server':
+		// Runs last: switching server clears the store, as for a real merchant.
+		require_once ABSPATH . 'wp-admin/includes/template.php';
+		$render = static function () {
+			ob_start();
+			Fetch_WC_Admin::render();
+			return ob_get_clean();
+		};
+		$html = $render();
+		preg_match_all( '/<option value="(production|staging|custom)"/', $html, $m );
+		$out['options']            = $m[1];
+		$out['help']               = false !== strpos( $html, 'Your key decides whether you see test data.' );
+		$out['custom_shown']       = (bool) preg_match( '/id="fetch_wc_custom_base_url_row"\s*>/', $html );
+		$out['custom_url_kept']    = Fetch_WC_Settings::base_url();
+		$out['token_before']       = (bool) get_transient( Fetch_WC_Api::TOKEN_TRANSIENT );
+		$out['notice']             = save_settings( array( 'environment' => 'staging' ) );
+		$out['staging_url']        = Fetch_WC_Settings::base_url();
+		$out['token_after']        = (bool) get_transient( Fetch_WC_Api::TOKEN_TRANSIENT );
+		$html                      = $render();
+		$out['staging_selected']   = (bool) preg_match( '/<option value="staging"\s+selected/', $html );
+		$out['custom_hidden']      = (bool) preg_match( '/id="fetch_wc_custom_base_url_row"\s*hidden/', $html );
+		save_settings( array( 'environment' => 'nonsense' ) );
+		$out['garbage_saved_as']   = Fetch_WC_Settings::get( 'environment' );
+		$out['production_url']     = Fetch_WC_Settings::base_url();
+		break;
+
 	case 'poll':
 		Fetch_WC_Order_Sync::poll();
 		$order = Fetch_WC_Order_Sync::find( 'ord-1' );
