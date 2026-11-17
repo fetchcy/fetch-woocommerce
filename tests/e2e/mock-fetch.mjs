@@ -37,6 +37,22 @@ function validateProduct(p, i) {
   if (p.price !== undefined && !money(p.price)) problems.push(`${at}.price not 2-decimal string: ${p.price}`);
   if (p.salePrice !== undefined && !money(p.salePrice)) problems.push(`${at}.salePrice not 2-decimal string: ${p.salePrice}`);
   if (p.stockCount !== undefined && !Number.isInteger(p.stockCount)) problems.push(`${at}.stockCount not int`);
+  // Optional content fields (1.3.0), with the live UpsertProductDto limits.
+  const text = (v, max) => typeof v === 'string' && v.length <= max;
+  if (p.description !== undefined && !text(p.description, 5000)) problems.push(`${at}.description not a string ≤ 5000`);
+  if (p.shortDescription !== undefined && !text(p.shortDescription, 5000)) problems.push(`${at}.shortDescription not a string ≤ 5000`);
+  if (p.specs !== undefined) {
+    if (!Array.isArray(p.specs) || p.specs.length > 100) problems.push(`${at}.specs not an array of ≤ 100`);
+    else p.specs.forEach((x, j) => { if (!x || !text(x.name, 100) || !text(x.value, 1000) || !x.name || !x.value || Object.keys(x).length !== 2) problems.push(`${at}.specs[${j}] not {name ≤ 100, value ≤ 1000}`); });
+  }
+  if (p.seo !== undefined) {
+    const s = p.seo;
+    if (!s || typeof s !== 'object' || Array.isArray(s) || Object.keys(s).some((k) => k !== 'title' && k !== 'description')) problems.push(`${at}.seo not {title?, description?}`);
+    else {
+      if (s.title !== undefined && !text(s.title, 255)) problems.push(`${at}.seo.title not a string ≤ 255`);
+      if (s.description !== undefined && !text(s.description, 1000)) problems.push(`${at}.seo.description not a string ≤ 1000`);
+    }
+  }
 }
 
 function send(res, code, body) {

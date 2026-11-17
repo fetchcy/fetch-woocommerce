@@ -44,7 +44,8 @@ class Fetch_WC_Product_Mapper {
 	 * Live Fetch stores accept SIMPLE products only through PUT /products, so a
 	 * variable product is sent as one simple product per variation: its own ref
 	 * (the variation SKU), "Parent – Black / M" as the name, its own price,
-	 * stock and image, and the parent's description, brand, category and tags.
+	 * stock and image, and the parent's descriptions, brand, category, tags,
+	 * specs and SEO meta.
 	 *
 	 * $force_inactive builds the same full rows switched off, for a deletion.
 	 *
@@ -169,12 +170,16 @@ class Fetch_WC_Product_Mapper {
 		return false;
 	}
 
-	/** Description, brand, category and tags, shared by a product's variations. */
+	/** Descriptions, brand, category, tags, specs and SEO, shared by a product's variations. */
 	private static function shared_fields( WC_Product $product ) {
 		$fields      = array();
 		$description = self::plain_text( $product->get_description() ? $product->get_description() : $product->get_short_description() );
 		if ( '' !== $description ) {
 			$fields['description'] = $description;
+		}
+		$short = self::plain_text( $product->get_short_description() );
+		if ( '' !== $short ) {
+			$fields['shortDescription'] = $short;
 		}
 		$brand = self::brand( $product );
 		if ( '' !== $brand ) {
@@ -187,6 +192,14 @@ class Fetch_WC_Product_Mapper {
 		$tags = wp_get_post_terms( $product->get_id(), 'product_tag', array( 'fields' => 'names' ) );
 		if ( ! is_wp_error( $tags ) && $tags ) {
 			$fields['tags'] = array_values( $tags );
+		}
+		$specs = self::specs( $product );
+		if ( $specs ) {
+			$fields['specs'] = $specs;
+		}
+		$seo = self::seo( $product );
+		if ( $seo ) {
+			$fields['seo'] = $seo;
 		}
 		return $fields;
 	}
@@ -314,17 +327,131 @@ class Fetch_WC_Product_Mapper {
 		return '';
 	}
 
+	/**
+	 * The "Brand attribute" setting first, then a brand taxonomy (WooCommerce
+	 * Brands, Perfect Brands, YITH), then any attribute, global or local, called
+	 * pa_brand/pa_brands or labelled Brand/Brands/Μάρκα. First value only.
+	 */
 	private static function brand( WC_Product $product ) {
+		$attributes = $product->get_attributes();
+		$chosen     = Fetch_WC_Settings::brand_attribute();
+		if ( '' !== $chosen && isset( $attributes[ $chosen ] ) && $attributes[ $chosen ] instanceof WC_Product_Attribute ) {
+			$values = self::attribute_values( $product, $attributes[ $chosen ] );
+			if ( $values ) {
+				return $values[0];
+			}
+		}
 		foreach ( array( 'product_brand', 'pwb-brand', 'yith_product_brand' ) as $taxonomy ) {
 			if ( taxonomy_exists( $taxonomy ) ) {
 				$terms = wp_get_post_terms( $product->get_id(), $taxonomy, array( 'fields' => 'names' ) );
 				if ( ! is_wp_error( $terms ) && $terms ) {
-					return (string) $terms[0];
+					return self::clean( $terms[0] );
 				}
 			}
 		}
-		$attribute = $product->get_attribute( 'pa_brand' );
-		return $attribute ? trim( explode( ',', $attribute )[0] ) : '';
+		foreach ( $attributes as $attribute ) {
+			if ( ! $attribute instanceof WC_Product_Attribute ) {
+				continue;
+			}
+			$name = strtolower( (string) $attribute->get_name() );
+			if ( in_array( $name, array( 'pa_brand', 'pa_brands' ), true ) || preg_match( '/^(brand|brands|μάρκα)$/iu', self::clean( wc_attribute_label( $attribute->get_name(), $product ) ) ) ) {
+				$values = self::attribute_values( $product, $attribute );
+				if ( $values ) {
+					return $values[0];
+				}
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * Visible, non-variation attributes in the shop's order: "Number of Cooking
+	 * Zones" => "4". The brand attribute is included; Fetch drops it per store.
+	 *
+	 * @return array<int,array{name:string,value:string}>
+	 */
+	private static function specs( WC_Product $product ) {
+		$specs = array();
+		foreach ( $product->get_attributes() as $attribute ) {
+			if ( ! $attribute instanceof WC_Product_Attribute || ! $attribute->get_visible() || $attribute->get_variation() ) {
+				continue;
+			}
+			$name  = self::cap( self::clean( wc_attribute_label( $attribute->get_name(), $product ) ), 100 );
+			$value = self::cap( implode( ', ', self::attribute_values( $product, $attribute ) ), 1000 );
+			if ( '' === $name || '' === $value ) {
+				continue;
+			}
+			$specs[] = array(
+				'name'  => $name,
+				'value' => $value,
+			);
+			if ( count( $specs ) >= 100 ) {
+				break;
+			}
+		}
+		return $specs;
+	}
+
+	/** @return string[] Term names (global attribute) or options (local), cleaned, without blanks. */
+	private static function attribute_values( WC_Product $product, WC_Product_Attribute $attribute ) {
+		if ( $attribute->is_taxonomy() ) {
+			$values = wc_get_product_terms( $product->get_id(), $attribute->get_name(), array( 'fields' => 'names' ) );
+			$values = is_wp_error( $values ) ? array() : (array) $values;
+		} else {
+			$values = $attribute->get_options();
+		}
+		return array_values( array_filter( array_map( array( __CLASS__, 'clean' ), $values ), 'strlen' ) );
+	}
+
+	/**
+	 * The shop's own SEO title and meta description, from Yoast SEO or Rank
+	 * Math, with their variables rendered when the plugin is loaded.
+	 *
+	 * @return array{title?:string,description?:string}
+	 */
+	private static function seo( WC_Product $product ) {
+		$id     = $product->get_id();
+		$fields = array(
+			'title'       => array( array( '_yoast_wpseo_title', 'yoast' ), array( 'rank_math_title', 'rank_math' ) ),
+			'description' => array( array( '_yoast_wpseo_metadesc', 'yoast' ), array( 'rank_math_description', 'rank_math' ) ),
+		);
+		$caps   = array(
+			'title'       => 255,
+			'description' => 1000,
+		);
+		$seo    = array();
+		foreach ( $fields as $field => $sources ) {
+			foreach ( $sources as $source ) {
+				$raw = (string) get_post_meta( $id, $source[0], true );
+				if ( '' === trim( $raw ) ) {
+					continue;
+				}
+				$value = self::cap( self::clean( self::replace_seo_vars( $raw, $id, $source[1] ) ), $caps[ $field ] );
+				if ( '' !== $value ) {
+					$seo[ $field ] = $value;
+					break;
+				}
+			}
+		}
+		return $seo;
+	}
+
+	/** Renders %%title%% (Yoast) or %title% (Rank Math); the raw value when the plugin is absent or fails. */
+	private static function replace_seo_vars( $value, $post_id, $plugin ) {
+		try {
+			if ( 'yoast' === $plugin && function_exists( 'wpseo_replace_vars' ) ) {
+				$post = get_post( $post_id );
+				return $post ? (string) wpseo_replace_vars( $value, $post ) : $value;
+			}
+			if ( 'rank_math' === $plugin && class_exists( '\RankMath\Helper' ) && method_exists( '\RankMath\Helper', 'replace_vars' ) ) {
+				$post = get_post( $post_id );
+				return $post ? (string) \RankMath\Helper::replace_vars( $value, $post ) : $value;
+			}
+		} catch ( Throwable $e ) {
+			// A third-party failure must not stop the product sync.
+			return $value;
+		}
+		return $value;
 	}
 
 	/** Deepest category, as "Parent > Child". */
@@ -355,9 +482,30 @@ class Fetch_WC_Product_Mapper {
 		return implode( ' > ', $names );
 	}
 
-	private static function plain_text( $html ) {
-		$text = trim( preg_replace( '/\s+/u', ' ', wp_strip_all_tags( (string) $html ) ) );
-		return function_exists( 'mb_substr' ) ? mb_substr( $text, 0, 5000 ) : substr( $text, 0, 5000 );
+	/**
+	 * HTML → plain text with paragraphs kept: block ends become a blank line,
+	 * <br>, </li> and a list start a line break; other whitespace collapses.
+	 * Capped at 5000 characters.
+	 */
+	public static function plain_text( $html ) {
+		$text = str_replace( array( "\r\n", "\r" ), "\n", (string) $html );
+		$text = preg_replace( '#<br\s*/?>|</li\s*>|<(ul|ol)\b[^>]*>#i', "\n", $text );
+		$text = preg_replace( '#</(p|div|h[1-6]|ul|ol|table|blockquote)\s*>#i', "\n\n", $text );
+		$text = html_entity_decode( wp_strip_all_tags( $text ), ENT_QUOTES, 'UTF-8' );
+		$text = preg_replace( '/[ \t\x{00A0}]+/u', ' ', $text );
+		$text = preg_replace( '/ ?\n ?/', "\n", $text );
+		$text = trim( preg_replace( '/\n{3,}/', "\n\n", $text ) );
+		return self::cap( $text, 5000 );
+	}
+
+	/** One line of plain text: tags and entities removed, whitespace collapsed. */
+	private static function clean( $value ) {
+		$text = html_entity_decode( wp_strip_all_tags( (string) $value ), ENT_QUOTES, 'UTF-8' );
+		return trim( preg_replace( '/[\s\x{00A0}]+/u', ' ', $text ) );
+	}
+
+	private static function cap( $text, $max ) {
+		return function_exists( 'mb_substr' ) ? trim( mb_substr( $text, 0, $max ) ) : trim( substr( $text, 0, $max ) );
 	}
 
 	/**

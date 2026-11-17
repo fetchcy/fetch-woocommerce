@@ -29,6 +29,7 @@ class Fetch_WC_Settings {
 			'sync_products'      => 'yes',
 			'price_markup'       => 0,
 			'catalogue_mode'     => 'add_update',
+			'brand_attribute'    => '',
 			'import_orders'      => 'yes',
 			'auto_accept'        => 'no',
 			'prep_minutes'       => 15,
@@ -92,6 +93,23 @@ class Fetch_WC_Settings {
 
 	public static function mirror() {
 		return 'mirror' === self::sanitize_catalogue_mode( self::get( 'catalogue_mode' ) );
+	}
+
+	/**
+	 * "Brand attribute" setting → a global attribute taxonomy ("pa_brands"), or
+	 * "" for Automatic. A name that is not a valid attribute taxonomy is "".
+	 * $known lists the shop's attribute taxonomies when they can be checked.
+	 */
+	public static function sanitize_brand_attribute( $raw, $known = null ) {
+		$value = strtolower( trim( (string) $raw ) );
+		if ( ! preg_match( '/^pa_[a-z0-9_%.-]{1,60}$/', $value ) ) {
+			return '';
+		}
+		return null === $known || in_array( $value, (array) $known, true ) ? $value : '';
+	}
+
+	public static function brand_attribute() {
+		return self::sanitize_brand_attribute( self::get( 'brand_attribute' ) );
 	}
 
 	public static function enabled( $key ) {

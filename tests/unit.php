@@ -4,8 +4,10 @@
  * Covers webhook signature verification, the order mapping rules, the
  * price markup maths, the server setting, request batching, the full
  * deactivation row, masked customer details, the per-order import lock,
- * the "Mirror this shop 1:1" scan, plan, guard and switch-off batches, and
- * default-language-only sync with stubbed WPML filters and Polylang functions.
+ * the "Mirror this shop 1:1" scan, plan, guard and switch-off batches,
+ * default-language-only sync with stubbed WPML filters and Polylang functions,
+ * and the product content sent to Fetch: brand detection, specs, plain-text
+ * descriptions with paragraphs, and Yoast / Rank Math SEO meta.
  */
 
 define( 'ABSPATH', __DIR__ . '/' );
@@ -24,11 +26,48 @@ function wp_json_encode( $data ) {
 function wp_strip_all_tags( $text ) {
 	return trim( strip_tags( (string) $text ) );
 }
+// Taxonomies, terms and post meta for the brand, specs and SEO tests.
+$GLOBALS['fake_taxonomies'] = array(); // taxonomy => [product id => term names]
+$GLOBALS['fake_post_meta']  = array(); // product id => [key => value]
 function taxonomy_exists( $taxonomy ) {
-	return false;
+	return isset( $GLOBALS['fake_taxonomies'][ $taxonomy ] );
 }
 function wp_get_post_terms( $id, $taxonomy, $args = array() ) {
-	return array();
+	return isset( $GLOBALS['fake_taxonomies'][ $taxonomy ][ $id ] ) ? $GLOBALS['fake_taxonomies'][ $taxonomy ][ $id ] : array();
+}
+function wc_get_product_terms( $id, $taxonomy, $args = array() ) {
+	return wp_get_post_terms( $id, $taxonomy, $args );
+}
+/** Global attributes have labels; a local attribute's name is its label. */
+function wc_attribute_label( $name, $product = null ) {
+	$labels = array( 'pa_brands' => 'Brands', 'pa_brand' => 'Brand', 'pa_installation' => 'Installation', 'pa_height' => 'Height', 'pa_dimensions' => 'Width', 'pa_depth' => 'Depth', 'pa_colour' => 'Colour' );
+	return isset( $labels[ $name ] ) ? $labels[ $name ] : $name;
+}
+function get_post_meta( $id, $key, $single = false ) {
+	return isset( $GLOBALS['fake_post_meta'][ $id ][ $key ] ) ? $GLOBALS['fake_post_meta'][ $id ][ $key ] : '';
+}
+function get_post( $id ) {
+	return isset( $GLOBALS['fake_products'][ $id ] ) ? (object) array( 'ID' => $id, 'post_title' => $GLOBALS['fake_products'][ $id ]->get_name() ) : null;
+}
+/** Yoast's renderer, for the variables these tests use. */
+function wpseo_replace_vars( $value, $post ) {
+	if ( false !== strpos( $value, '%%explode%%' ) ) {
+		throw new RuntimeException( 'Yoast failed' );
+	}
+	return str_replace( array( '%%title%%', '%%sep%%', '%%sitename%%' ), array( $post->post_title, '-', 'Shop' ), $value );
+}
+eval( 'namespace RankMath; class Helper { public static function replace_vars( $value, $post ) { return str_replace( "%title%", $post->post_title, $value ); } }' );
+/** WooCommerce's product attribute: global (taxonomy) or local (options). */
+class WC_Product_Attribute {
+	private $d;
+	public function __construct( $name, array $options = array(), $visible = true, $variation = false ) {
+		$this->d = array( $name, $options, $visible, $variation );
+	}
+	public function get_name() { return $this->d[0]; }
+	public function get_options() { return $this->d[1]; }
+	public function get_visible() { return $this->d[2]; }
+	public function get_variation() { return $this->d[3]; }
+	public function is_taxonomy() { return 0 === strpos( $this->d[0], 'pa_' ); }
 }
 class WP_Error {
 	private $message;
@@ -132,7 +171,7 @@ function wp_remote_retrieve_body( $response ) {
 class WC_Product {
 	public $data;
 	public function __construct( array $data ) {
-		$this->data = $data + array( 'id' => 1, 'type' => 'simple', 'status' => 'publish', 'sku' => '', 'meta' => array(), 'sale' => '', 'visibility' => 'visible', 'children' => array(), 'parent' => 0, 'stock' => 1 );
+		$this->data = $data + array( 'id' => 1, 'type' => 'simple', 'status' => 'publish', 'sku' => '', 'meta' => array(), 'sale' => '', 'visibility' => 'visible', 'children' => array(), 'parent' => 0, 'stock' => 1, 'description' => 'Braided cable', 'short' => '', 'attributes' => array() );
 	}
 	public function is_type( $type ) { return $this->data['type'] === $type; }
 	public function get_children() { return $this->data['children']; }
@@ -145,9 +184,16 @@ class WC_Product {
 	public function get_meta( $key ) { return isset( $this->data['meta'][ $key ] ) ? $this->data['meta'][ $key ] : ''; }
 	public function get_status() { return $this->data['status']; }
 	public function get_catalog_visibility() { return $this->data['visibility']; }
-	public function get_description() { return 'Braided cable'; }
-	public function get_short_description() { return ''; }
-	public function get_attribute( $name ) { return ''; }
+	public function get_description() { return $this->data['description']; }
+	public function get_short_description() { return $this->data['short']; }
+	/** Keyed like WooCommerce: taxonomy name, or the sanitized local name. */
+	public function get_attributes() {
+		$out = array();
+		foreach ( $this->data['attributes'] as $attribute ) {
+			$out[ strtolower( str_replace( ' ', '-', $attribute->get_name() ) ) ] = $attribute;
+		}
+		return $out;
+	}
 	public function get_category_ids() { return array(); }
 	public function get_regular_price( $context = 'view' ) { return $this->data['price']; }
 	public function get_sale_price( $context = 'view' ) { return $this->data['sale']; }
@@ -438,6 +484,121 @@ $live = Fetch_WC_Product_Mapper::to_fetch_items( $cable );
 unset( $live[0][0]['isActive'], $row['isActive'] );
 check( 'deactivation row equals the normal row apart from isActive', $row, $live[0][0] );
 check( 'normal sync of a published product stays active', Fetch_WC_Product_Mapper::to_fetch_items( $cable )[0][0]['isActive'], true );
+
+// --- Brand, specs, descriptions and SEO (1.3.0) ---------------------------------------
+// A hob as a real appliance shop lists it: brand in the global pa_brands ("Brands"), specs a mix of
+// local and global attributes, one of them hidden and one a variation axis.
+$GLOBALS['fake_taxonomies']['pa_brands']       = array( 300 => array( 'HAIER' ) );
+$GLOBALS['fake_taxonomies']['pa_installation'] = array( 300 => array( 'Built-in' ) );
+$GLOBALS['fake_taxonomies']['pa_height']       = array( 300 => array( '5.1 cm' ) );
+$GLOBALS['fake_taxonomies']['pa_dimensions']   = array( 300 => array( '65 cm' ) );
+$GLOBALS['fake_taxonomies']['pa_depth']        = array( 300 => array( '51 cm' ) );
+$hob_attributes = array(
+	new WC_Product_Attribute( 'pa_brands' ),
+	new WC_Product_Attribute( 'Type', array( 'Induction' ) ),
+	new WC_Product_Attribute( 'Number of Cooking Zones', array( '4 (Varycook flexible zones)' ) ),
+	new WC_Product_Attribute( 'Special Functions', array( '2200 W &amp; boost', 'Wi-Fi' ) ),
+	new WC_Product_Attribute( 'Dimensions (H x W x D)', array( '5.1 x 65 x 51 cm' ) ),
+	new WC_Product_Attribute( 'Cut-out Dimensions (W x D)', array( '56 x 48 cm' ) ),
+	new WC_Product_Attribute( 'Internal code', array( 'X-99' ), false ),
+	new WC_Product_Attribute( 'Empty', array( '  ' ) ),
+	new WC_Product_Attribute( 'pa_installation' ),
+	new WC_Product_Attribute( 'pa_height' ),
+	new WC_Product_Attribute( 'pa_dimensions' ),
+	new WC_Product_Attribute( 'pa_depth' ),
+);
+$hob = new WC_Product(
+	array(
+		'id'          => 300,
+		'name'        => 'Induction Hob, 65cm, 4 Zones',
+		'sku'         => 'HOB-65',
+		'price'       => '500',
+		'description' => "<p>A 65 cm induction hob.</p>\n<p>Touch controls &amp; timer;<br>cut-out 56 x 48 cm.</p><ul><li>Wi-Fi</li><li>Bluetooth</li></ul>",
+		'short'       => '<p>Four zones,   Varycook.</p>',
+		'attributes'  => $hob_attributes,
+	)
+);
+$GLOBALS['fake_products'][300] = $hob;
+$GLOBALS['fake_post_meta'][300] = array(
+	'_yoast_wpseo_title'    => '%%title%% %%sep%% %%sitename%%',
+	'_yoast_wpseo_metadesc' => '',
+	'rank_math_description' => 'Buy the %title% online.',
+);
+$row = Fetch_WC_Product_Mapper::to_fetch_items( $hob )[0][0];
+check( 'brand: global pa_brands ("Brands") is found automatically', $row['brand'], 'HAIER' );
+check(
+	'specs: visible non-variation attributes, labels, shop order, brand included, hidden and empty left out',
+	$row['specs'],
+	array(
+		array( 'name' => 'Brands', 'value' => 'HAIER' ),
+		array( 'name' => 'Type', 'value' => 'Induction' ),
+		array( 'name' => 'Number of Cooking Zones', 'value' => '4 (Varycook flexible zones)' ),
+		array( 'name' => 'Special Functions', 'value' => '2200 W & boost, Wi-Fi' ),
+		array( 'name' => 'Dimensions (H x W x D)', 'value' => '5.1 x 65 x 51 cm' ),
+		array( 'name' => 'Cut-out Dimensions (W x D)', 'value' => '56 x 48 cm' ),
+		array( 'name' => 'Installation', 'value' => 'Built-in' ),
+		array( 'name' => 'Height', 'value' => '5.1 cm' ),
+		array( 'name' => 'Width', 'value' => '65 cm' ),
+		array( 'name' => 'Depth', 'value' => '51 cm' ),
+	)
+);
+check( 'description: paragraphs kept as blank lines, <br> and list items as line breaks, entities decoded', $row['description'], "A 65 cm induction hob.\n\nTouch controls & timer;\ncut-out 56 x 48 cm.\n\nWi-Fi\nBluetooth" );
+check( 'shortDescription: plain text, whitespace collapsed', $row['shortDescription'], 'Four zones, Varycook.' );
+check( 'seo: Yoast title rendered, Rank Math description used when Yoast has none', $row['seo'], array( 'title' => 'Induction Hob, 65cm, 4 Zones - Shop', 'description' => 'Buy the Induction Hob, 65cm, 4 Zones online.' ) );
+
+$GLOBALS['fake_post_meta'][300] = array( '_yoast_wpseo_title' => '%%explode%% title' );
+check( 'seo: a failing Yoast renderer sends the raw value instead of stopping the sync', Fetch_WC_Product_Mapper::to_fetch_items( $hob )[0][0]['seo'], array( 'title' => '%%explode%% title' ) );
+$GLOBALS['fake_post_meta'][300] = array( '_yoast_wpseo_title' => '   ' );
+check( 'seo: omitted when the shop has none', array_key_exists( 'seo', Fetch_WC_Product_Mapper::to_fetch_items( $hob )[0][0] ), false );
+
+$GLOBALS['fake_options']['fetch_wc_settings'] = array( 'brand_attribute' => 'pa_installation' );
+check( 'brand: the "Brand attribute" setting wins', Fetch_WC_Product_Mapper::to_fetch_items( $hob )[0][0]['brand'], 'Built-in' );
+$GLOBALS['fake_options']['fetch_wc_settings'] = array( 'brand_attribute' => 'pa_colour' );
+check( 'brand: a chosen attribute the product lacks falls back to automatic', Fetch_WC_Product_Mapper::to_fetch_items( $hob )[0][0]['brand'], 'HAIER' );
+$GLOBALS['fake_options']['fetch_wc_settings'] = array();
+
+$GLOBALS['fake_taxonomies']['product_brand'] = array( 300 => array( 'Haier Europe' ) );
+check( 'brand: a brand taxonomy still comes before attributes', Fetch_WC_Product_Mapper::to_fetch_items( $hob )[0][0]['brand'], 'Haier Europe' );
+unset( $GLOBALS['fake_taxonomies']['product_brand'] );
+
+$local_brand = new WC_Product( array( 'id' => 301, 'name' => 'Kettle', 'price' => '20', 'description' => '', 'short' => 'Fast <b>kettle</b>', 'attributes' => array( new WC_Product_Attribute( 'Μάρκα', array( 'Bosch', 'Siemens' ), false ) ) ) );
+$row         = Fetch_WC_Product_Mapper::to_fetch_items( $local_brand )[0][0];
+check( 'brand: a local attribute labelled Μάρκα, first value, even when hidden', $row['brand'], 'Bosch' );
+check( 'specs: none sent when every attribute is hidden', array_key_exists( 'specs', $row ), false );
+check( 'description: falls back to the short description, as before', array( $row['description'], $row['shortDescription'] ), array( 'Fast kettle', 'Fast kettle' ) );
+$GLOBALS['fake_taxonomies']['pa_brand'] = array( 302 => array( 'Philips', 'Saeco' ) );
+check( 'brand: pa_brand, first term', Fetch_WC_Product_Mapper::to_fetch_items( new WC_Product( array( 'id' => 302, 'name' => 'Iron', 'price' => '30', 'attributes' => array( new WC_Product_Attribute( 'pa_brand' ) ) ) ) )[0][0]['brand'], 'Philips' );
+check( 'no brand, specs, short description or seo on a bare product', array_intersect( array( 'brand', 'specs', 'shortDescription', 'seo' ), array_keys( Fetch_WC_Product_Mapper::to_fetch_items( new WC_Product( array( 'id' => 303, 'name' => 'Plain', 'price' => '1' ) ) )[0][0] ) ), array() );
+
+$long = array();
+for ( $i = 0; $i < 120; $i++ ) {
+	$long[] = new WC_Product_Attribute( 'Spec ' . $i . str_repeat( 'n', 150 ), array( str_repeat( 'v', 1500 ) ) );
+}
+$specs = Fetch_WC_Product_Mapper::to_fetch_items( new WC_Product( array( 'id' => 304, 'name' => 'Big', 'price' => '1', 'attributes' => $long ) ) )[0][0]['specs'];
+check( 'specs: capped at the API limits (100 rows, name 100, value 1000)', array( count( $specs ), mb_strlen( $specs[0]['name'] ), mb_strlen( $specs[0]['value'] ) ), array( 100, 100, 1000 ) );
+
+check( 'plain_text: unwrapped text keeps its own blank lines', Fetch_WC_Product_Mapper::plain_text( "First line\r\nsecond line\r\n\r\n\r\nNext paragraph &nbsp; here" ), "First line\nsecond line\n\nNext paragraph here" );
+check( 'plain_text: headings and divs end a paragraph', Fetch_WC_Product_Mapper::plain_text( '<h2>Specs</h2><div>Quiet</div>Intro<ol><li>One</li></ol>' ), "Specs\n\nQuiet\n\nIntro\nOne" );
+check( 'plain_text: capped at 5000 characters', mb_strlen( Fetch_WC_Product_Mapper::plain_text( str_repeat( 'ab ', 3000 ) ) ), 5000 );
+
+// Variations sent as simple products carry the parent's specs and SEO.
+$GLOBALS['fake_taxonomies']['pa_colour'] = array( 310 => array( 'Black', 'White' ) );
+$GLOBALS['fake_post_meta'][310]         = array( 'rank_math_title' => '%title% | Shop' );
+$GLOBALS['fake_products'][311]          = new WC_Product_Variation( array( 'id' => 311, 'name' => 'Case Black', 'sku' => 'CS-B', 'price' => '9', 'parent' => 310 ) );
+$GLOBALS['fake_products'][312]          = new WC_Product_Variation( array( 'id' => 312, 'name' => 'Case White', 'sku' => 'CS-W', 'price' => '9', 'parent' => 310 ) );
+$case                                   = new WC_Product( array( 'id' => 310, 'type' => 'variable', 'name' => 'Phone Case', 'children' => array( 311, 312 ), 'attributes' => array( new WC_Product_Attribute( 'pa_colour', array(), true, true ), new WC_Product_Attribute( 'Material', array( 'Silicone' ) ) ) ) );
+$GLOBALS['fake_products'][310]          = $case;
+$rows                                   = array_map( function ( $pair ) { return $pair[0]; }, Fetch_WC_Product_Mapper::to_fetch_items( $case ) );
+check( 'variations: each carries the parent specs without the variation axis', array_column( $rows, 'specs' ), array_fill( 0, 2, array( array( 'name' => 'Material', 'value' => 'Silicone' ) ) ) );
+check( 'variations: each carries the parent SEO (Rank Math rendered)', array_column( $rows, 'seo' ), array_fill( 0, 2, array( 'title' => 'Phone Case | Shop' ) ) );
+unset( $GLOBALS['fake_products'][300], $GLOBALS['fake_products'][310], $GLOBALS['fake_products'][311], $GLOBALS['fake_products'][312] );
+
+// "Brand attribute" setting.
+check( 'brand setting: Automatic by default', Fetch_WC_Settings::brand_attribute(), '' );
+check( 'brand setting: a known attribute taxonomy is kept', Fetch_WC_Settings::sanitize_brand_attribute( 'pa_brands', array( 'pa_brands', 'pa_depth' ) ), 'pa_brands' );
+check( 'brand setting: an attribute the shop does not have is Automatic', Fetch_WC_Settings::sanitize_brand_attribute( 'pa_brand', array( 'pa_brands' ) ), '' );
+check( 'brand setting: not an attribute taxonomy is Automatic', array( Fetch_WC_Settings::sanitize_brand_attribute( 'product_brand' ), Fetch_WC_Settings::sanitize_brand_attribute( 'pa_x"><script>' ), Fetch_WC_Settings::sanitize_brand_attribute( '' ) ), array( '', '', '' ) );
+check( 'brand setting: url-encoded (non-Latin) attribute slugs are allowed', Fetch_WC_Settings::sanitize_brand_attribute( 'pa_%ce%bc%ce%ac%cf%81%ce%ba%ce%b1' ), 'pa_%ce%bc%ce%ac%cf%81%ce%ba%ce%b1' );
 
 // --- Masked customer details -----------------------------------------------------------
 $real   = array( 'customer' => array( 'name' => 'Maria Georgiou', 'phone' => '+35799123456', 'address' => array( 'line1' => 'Makariou 12', 'city' => 'Nicosia', 'postalCode' => '1065', 'notes' => 'Ring twice' ) ) );

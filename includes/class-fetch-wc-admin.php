@@ -169,6 +169,19 @@ class Fetch_WC_Admin {
 							<p class="description"><?php esc_html_e( 'Added to every price and sale price sent to Fetch, e.g. 10 sends a €10.00 product as €11.00. Your WooCommerce prices are not changed.', 'fetch-for-woocommerce' ); ?></p>
 						</td>
 					</tr>
+					<tr>
+						<th scope="row"><label for="fetch_wc_brand_attribute"><?php esc_html_e( 'Brand attribute', 'fetch-for-woocommerce' ); ?></label></th>
+						<td>
+							<?php $brand_attribute = Fetch_WC_Settings::sanitize_brand_attribute( $s['brand_attribute'] ); ?>
+							<select id="fetch_wc_brand_attribute" name="brand_attribute">
+								<option value="" <?php selected( $brand_attribute, '' ); ?>><?php esc_html_e( 'Automatic', 'fetch-for-woocommerce' ); ?></option>
+								<?php foreach ( self::attribute_taxonomies() as $taxonomy => $label ) : ?>
+									<option value="<?php echo esc_attr( $taxonomy ); ?>" <?php selected( $brand_attribute, $taxonomy ); ?>><?php echo esc_html( $label . ' (' . $taxonomy . ')' ); ?></option>
+								<?php endforeach; ?>
+							</select>
+							<p class="description"><?php esc_html_e( 'Automatic uses a brand taxonomy (WooCommerce Brands, Perfect Brands, YITH Brands), then any product attribute named Brand or Brands. Choose an attribute if your shop keeps the brand somewhere else. Changing it resends all products to Fetch.', 'fetch-for-woocommerce' ); ?></p>
+						</td>
+					</tr>
 				</table>
 
 				<?php self::render_catalogue_mode( $s ); ?>
@@ -232,6 +245,15 @@ class Fetch_WC_Admin {
 			<?php endif; ?>
 		</div>
 		<?php
+	}
+
+	/** @return array<string,string> The shop's global attributes, taxonomy => label. */
+	private static function attribute_taxonomies() {
+		$out = array();
+		foreach ( function_exists( 'wc_get_attribute_taxonomies' ) ? wc_get_attribute_taxonomies() : array() as $attribute ) {
+			$out[ wc_attribute_taxonomy_name( $attribute->attribute_name ) ] = $attribute->attribute_label ? $attribute->attribute_label : $attribute->attribute_name;
+		}
+		return $out;
 	}
 
 	private static function render_catalogue_mode( array $s ) {
@@ -312,7 +334,7 @@ class Fetch_WC_Admin {
 			wp_safe_redirect( self::page_url() . ( 'mirror_preview' === $do ? '#fetch_wc_catalogue' : '' ) );
 			exit;
 		}
-		$markup_resync = self::save( $_POST );
+		$resync = self::save( $_POST );
 
 		switch ( $do ) {
 			case 'connect':
@@ -328,12 +350,12 @@ class Fetch_WC_Admin {
 				self::register_webhook();
 				break;
 			default:
-				self::notice(
-					'success',
-					$markup_resync
-						? __( 'Settings saved. The price markup changed, so all products are being resent to Fetch.', 'fetch-for-woocommerce' )
-						: __( 'Settings saved.', 'fetch-for-woocommerce' )
+				$messages = array(
+					''       => __( 'Settings saved.', 'fetch-for-woocommerce' ),
+					'markup' => __( 'Settings saved. The price markup changed, so all products are being resent to Fetch.', 'fetch-for-woocommerce' ),
+					'brand'  => __( 'Settings saved. The brand attribute changed, so all products are being resent to Fetch.', 'fetch-for-woocommerce' ),
 				);
+				self::notice( 'success', $messages[ $resync ] );
 		}
 
 		Fetch_WC_Order_Sync::schedule_poll();
@@ -343,7 +365,7 @@ class Fetch_WC_Admin {
 
 	/**
 	 * @param array<string,mixed> $post Raw $_POST.
-	 * @return bool True when a changed price markup started a full product resync.
+	 * @return string "markup" or "brand" when that change started a full product resync, else "".
 	 */
 	private static function save( array $post ) {
 		$old = Fetch_WC_Settings::all();
@@ -361,6 +383,7 @@ class Fetch_WC_Admin {
 			'prep_minutes'    => max( 0, min( 180, (int) $get( 'prep_minutes' ) ) ),
 			'price_markup'    => Fetch_WC_Settings::sanitize_markup( $get( 'price_markup' ) ),
 			'catalogue_mode'  => Fetch_WC_Settings::sanitize_catalogue_mode( $get( 'catalogue_mode' ) ),
+			'brand_attribute' => Fetch_WC_Settings::sanitize_brand_attribute( $get( 'brand_attribute' ), array_keys( self::attribute_taxonomies() ) ),
 		);
 
 		$secret = isset( $post['client_secret'] ) ? trim( (string) wp_unslash( $post['client_secret'] ) ) : '';
@@ -406,14 +429,21 @@ class Fetch_WC_Admin {
 			Fetch_WC_Logger::info( 'mirror' === $new['catalogue_mode'] ? 'Catalogue mode: mirror this shop 1:1 (applies at the end of the next full sync).' : 'Catalogue mode: add and update only.' );
 		}
 
-		// Every Fetch price depends on the markup, so resend the catalogue when it changes.
+		// Every Fetch price depends on the markup, and every brand on the brand
+		// attribute, so resend the catalogue when either changes.
 		$old_markup = Fetch_WC_Settings::sanitize_markup( $old['price_markup'] );
-		if ( $new['price_markup'] === $old_markup || ! Fetch_WC_Settings::is_connected() || 'yes' !== $new['sync_products'] ) {
-			return false;
+		$old_brand  = Fetch_WC_Settings::sanitize_brand_attribute( $old['brand_attribute'] );
+		$reason     = $new['price_markup'] !== $old_markup ? 'markup' : ( $new['brand_attribute'] !== $old_brand ? 'brand' : '' );
+		if ( '' === $reason || ! Fetch_WC_Settings::is_connected() || 'yes' !== $new['sync_products'] ) {
+			return '';
 		}
-		Fetch_WC_Logger::info( sprintf( 'Price markup changed from %s%% to %s%%; resending all products.', $old_markup, $new['price_markup'] ) );
+		Fetch_WC_Logger::info(
+			'markup' === $reason
+				? sprintf( 'Price markup changed from %s%% to %s%%; resending all products.', $old_markup, $new['price_markup'] )
+				: sprintf( 'Brand attribute changed from %s to %s; resending all products.', '' === $old_brand ? 'Automatic' : $old_brand, '' === $new['brand_attribute'] ? 'Automatic' : $new['brand_attribute'] )
+		);
 		Fetch_WC_Product_Sync::start_bulk_sync();
-		return true;
+		return $reason;
 	}
 
 	private static function mirror_preview() {

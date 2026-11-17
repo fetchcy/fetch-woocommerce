@@ -46,6 +46,7 @@ It uses the [Fetch Partner API](https://developer.fetch.com.cy).
 | Fetch store | The Fetch store your WooCommerce products and orders belong to. |
 | Sync to Fetch | Turns automatic product, price and stock sync on or off. Multilingual shops (WPML, Polylang) sync products in the default language only; see [Multilingual shops](#multilingual-shops). |
 | Catalogue mode | **Add and update only** (default): products from this shop are added to Fetch and kept up to date; anything else in your Fetch store is left as it is. **Mirror this shop 1:1**: products in your Fetch store that aren't in this shop are switched off on Fetch (not deleted) at the end of every full sync. Prices and stock always follow this shop. **Preview** shows what would change first. See [Mirror this shop 1:1](#mirror-this-shop-11). |
+| Brand attribute | **Automatic** (default): the brand comes from a brand taxonomy (WooCommerce Brands, Perfect Brands, YITH Brands), else from any attribute named Brand, Brands or Μάρκα. Choose one of your global attributes if your shop keeps the brand somewhere else; products without it fall back to Automatic. Changing it resends all products to Fetch automatically. See [Brand, specifications and SEO](#brand-specifications-and-seo). |
 | Price markup (%) | 0–100, default 0. Added to every price and sale price sent to Fetch, e.g. 10 sends a €10.00 product as €11.00. Your WooCommerce prices are not changed. Changing it resends all products to Fetch automatically. |
 | Import Fetch orders | Turns order import on or off. |
 | Auto-accept | Accepts new Fetch orders automatically, using the preparation time below. |
@@ -71,7 +72,7 @@ Fetch maintains the name, photos and category of shared catalogue products.
 
 | WooCommerce | Fetch |
 |---|---|
-| Name, description | Name, description (HTML is stripped) |
+| Name, description, short description | Name, description, short description (plain text, paragraphs kept) |
 | Regular price, sale price | Price and sale price, **VAT included** (calculated with your WooCommerce tax settings), plus your **price markup** if you set one, rounded half-up to the cent |
 | Stock (managed) | Exact quantity |
 | Stock (not managed) | Sold without a stock limit; **Out of stock** switches it off |
@@ -81,6 +82,27 @@ Fetch maintains the name, photos and category of shared catalogue products.
 | Main image and gallery | Photos (set when the product is first created on Fetch) |
 | Category | Category path, matched against Fetch's categories |
 | Tags, brand, GTIN/EAN | Tags, brand, barcode |
+| Attributes shown on the product page | Specifications |
+| Yoast SEO / Rank Math title and meta description | SEO title and description |
+
+### Brand, specifications and SEO
+
+- **Brand.**
+  The **Brand attribute** setting if you chose one, then a brand taxonomy (`product_brand`, `pwb-brand`, `yith_product_brand`), then any attribute, global or custom, whose taxonomy is `pa_brand`/`pa_brands` or whose label is Brand, Brands or Μάρκα.
+  The first value is used.
+- **Specifications.**
+  Every attribute with **Visible on the product page** ticked and **Used for variations** not ticked, global or custom, in the product's attribute order.
+  The name is the attribute's label (a global attribute's label, not its slug); the value is its terms or values joined with ", ".
+  The brand attribute is included too.
+  At most 100 per product, names up to 100 characters and values up to 1,000.
+- **Descriptions.**
+  HTML is converted to plain text with paragraphs kept as blank lines and `<br>` and list items as line breaks.
+  When a product has no description, its short description is sent as the description too.
+- **SEO.**
+  The SEO title and meta description from **Yoast SEO** (`_yoast_wpseo_title`, `_yoast_wpseo_metadesc`) or **Rank Math** (`rank_math_title`, `rank_math_description`), with the plugin's variables filled in when it is active.
+  Empty values are not sent.
+
+Fetch decides, per store, how these appear on your Fetch store.
 
 ### Multilingual shops
 
@@ -103,7 +125,7 @@ The language comes from the plugins' public APIs (`wpml_default_language` and `w
 
 Fetch lists each variation as its own product.
 A T-shirt with sizes S, M and L becomes three Fetch products, for example **"Logo T-shirt – Black / M"**, each with its own SKU, price, stock and image.
-The parent's description, brand, category and tags are shared by all of them.
+The parent's descriptions, brand, category, tags, specifications and SEO text are shared by all of them.
 
 ### Timing
 
@@ -223,6 +245,21 @@ node tests/e2e/run.mjs
 ```
 
 See [tests/README.md](tests/README.md) for details.
+
+## Changelog
+
+### 1.3.0
+
+- New: product **specifications**.
+  Every attribute shown on the product page, global or custom, is sent to Fetch with its label and values, in your order.
+  Variations sent as separate Fetch products carry their parent's specifications.
+- New: the product's **short description**, and its **SEO title and meta description** from Yoast SEO or Rank Math (variables filled in), are sent to Fetch.
+- New: **Brand attribute** setting.
+  The brand is now also found in any attribute named Brand, Brands or Μάρκα (for example a global "Brands" attribute), global or custom; choose another attribute if your shop keeps the brand elsewhere.
+  Changing it resends all products to Fetch.
+- Fix: descriptions keep their paragraphs and line breaks (and decode `&amp;` and similar) instead of being flattened into one line.
+
+Earlier versions are listed in [readme.txt](readme.txt).
 
 ## Support
 
