@@ -20,6 +20,11 @@ class Fetch_WC_Order_Actions {
 
 	public static function init() {
 		add_action( 'add_meta_boxes', array( __CLASS__, 'add_meta_box' ), 10, 2 );
+		// "Fetch store" column in the orders list, with HPOS and with the posts table.
+		add_filter( 'manage_woocommerce_page_wc-orders_columns', array( __CLASS__, 'add_column' ) );
+		add_action( 'manage_woocommerce_page_wc-orders_custom_column', array( __CLASS__, 'render_column' ), 10, 2 );
+		add_filter( 'manage_edit-shop_order_columns', array( __CLASS__, 'add_column' ) );
+		add_action( 'manage_shop_order_posts_custom_column', array( __CLASS__, 'render_column' ), 10, 2 );
 		// Not admin_post_{action}: the order screen's own form posts its own
 		// `action` field, which admin-post.php would dispatch on instead.
 		add_action( 'admin_init', array( __CLASS__, 'maybe_handle_post' ) );
@@ -34,6 +39,41 @@ class Fetch_WC_Order_Actions {
 		add_meta_box( 'fetch-wc-order', __( 'Fetch', 'fetch-for-woocommerce' ), array( __CLASS__, 'render' ), $screen, 'side', 'high' );
 	}
 
+	/** The Fetch store an order came from (by name), or its id when the store is no longer connected. */
+	public static function store_label( WC_Order $order ) {
+		$id   = (string) $order->get_meta( Fetch_WC_Order_Sync::META_STORE_ID );
+		$name = '' !== $id && Fetch_WC_Settings::store( $id ) ? Fetch_WC_Settings::store_name( $id ) : (string) $order->get_meta( Fetch_WC_Order_Sync::META_STORE_NAME );
+		return '' !== $name ? $name : $id;
+	}
+
+	/** Only when more than one Fetch store is connected: one store needs no column. */
+	public static function add_column( $columns ) {
+		if ( count( Fetch_WC_Settings::stores() ) < 2 || ! is_array( $columns ) ) {
+			return $columns;
+		}
+		$out = array();
+		foreach ( $columns as $key => $label ) {
+			$out[ $key ] = $label;
+			if ( 'order_status' === $key ) {
+				$out['fetch_store'] = __( 'Fetch store', 'fetch-for-woocommerce' );
+			}
+		}
+		if ( ! isset( $out['fetch_store'] ) ) {
+			$out['fetch_store'] = __( 'Fetch store', 'fetch-for-woocommerce' );
+		}
+		return $out;
+	}
+
+	public static function render_column( $column, $post_or_order ) {
+		if ( 'fetch_store' !== $column ) {
+			return;
+		}
+		$order = $post_or_order instanceof WC_Order ? $post_or_order : wc_get_order( $post_or_order );
+		if ( $order && $order->get_meta( Fetch_WC_Order_Sync::META_ORDER_ID ) ) {
+			echo '<mark class="order-status"><span>' . esc_html( self::store_label( $order ) ) . '</span></mark>';
+		}
+	}
+
 	public static function render( $post_or_order ) {
 		$order = $post_or_order instanceof WC_Order ? $post_or_order : wc_get_order( $post_or_order->ID );
 		if ( ! $order ) {
@@ -44,6 +84,10 @@ class Fetch_WC_Order_Actions {
 		$url     = admin_url( 'admin-post.php' );
 
 		echo '<p><strong>' . esc_html__( 'Fetch order', 'fetch-for-woocommerce' ) . ':</strong> ' . esc_html( (string) $order->get_meta( Fetch_WC_Order_Sync::META_ORDER_NUMBER ) ) . '<br>';
+		$store = self::store_label( $order );
+		if ( '' !== $store ) {
+			echo '<strong>' . esc_html__( 'Fetch store', 'fetch-for-woocommerce' ) . ':</strong> <span class="fetch-wc-store">' . esc_html( $store ) . '</span><br>';
+		}
 		echo '<strong>' . esc_html__( 'Status', 'fetch-for-woocommerce' ) . ':</strong> ' . esc_html( Fetch_WC_Order_Mapper::label( $status ) ) . '</p>';
 
 		if ( ! $actions ) {
@@ -59,7 +103,7 @@ class Fetch_WC_Order_Actions {
 		$formaction = esc_url( $url );
 
 		if ( in_array( 'accept', $actions, true ) ) {
-			echo '<p><label>' . esc_html__( 'Ready in (minutes)', 'fetch-for-woocommerce' ) . ' <input type="number" name="fetch_wc_prep_minutes" min="0" max="180" style="width:70px" value="' . esc_attr( (int) Fetch_WC_Settings::get( 'prep_minutes' ) ) . '"></label></p>';
+			echo '<p><label>' . esc_html__( 'Ready in (minutes)', 'fetch-for-woocommerce' ) . ' <input type="number" name="fetch_wc_prep_minutes" min="0" max="180" style="width:70px" value="' . esc_attr( Fetch_WC_Settings::store_prep_minutes( self::store_id( $order ) ) ) . '"></label></p>';
 			echo '<p><button type="submit" class="button button-primary" formaction="' . $formaction . '" formmethod="post" name="fetch_wc_action" value="accept">' . esc_html__( 'Accept order', 'fetch-for-woocommerce' ) . '</button></p>'; // phpcs:ignore WordPress.Security.EscapeOutput -- escaped above.
 		}
 		if ( in_array( 'ready', $actions, true ) ) {
@@ -91,7 +135,7 @@ class Fetch_WC_Order_Actions {
 		$action = isset( $_POST['fetch_wc_action'] ) ? sanitize_key( wp_unslash( $_POST['fetch_wc_action'] ) ) : '';
 		if ( $order ) {
 			$args  = array(
-				'prepMinutes' => isset( $_POST['fetch_wc_prep_minutes'] ) ? (int) $_POST['fetch_wc_prep_minutes'] : (int) Fetch_WC_Settings::get( 'prep_minutes' ),
+				'prepMinutes' => isset( $_POST['fetch_wc_prep_minutes'] ) ? (int) $_POST['fetch_wc_prep_minutes'] : Fetch_WC_Settings::store_prep_minutes( self::store_id( $order ) ),
 				'reason'      => isset( $_POST['fetch_wc_reason'] ) ? sanitize_text_field( wp_unslash( $_POST['fetch_wc_reason'] ) ) : 'OTHER',
 				'note'        => isset( $_POST['fetch_wc_note'] ) ? sanitize_text_field( wp_unslash( $_POST['fetch_wc_note'] ) ) : '',
 			);
@@ -106,13 +150,18 @@ class Fetch_WC_Order_Actions {
 		exit;
 	}
 
+	/** The order's own Fetch store; orders imported without one belong to the primary store. */
+	public static function store_id( WC_Order $order ) {
+		return Fetch_WC_Settings::resolve_store( (string) $order->get_meta( Fetch_WC_Order_Sync::META_STORE_ID ) );
+	}
+
 	/**
-	 * Call Fetch for one action and mirror the new status.
+	 * Call Fetch for one action, against the order's own store, and mirror the new status.
 	 *
 	 * @return string|null Error message, or null on success.
 	 */
 	public static function run( WC_Order $order, $action, array $args = array() ) {
-		$store_id = (string) Fetch_WC_Settings::get( 'store_id' );
+		$store_id = self::store_id( $order );
 		$fetch_id = (string) $order->get_meta( Fetch_WC_Order_Sync::META_ORDER_ID );
 		$api      = new Fetch_WC_Api();
 
