@@ -6,7 +6,7 @@ Tested up to: 6.8
 Requires PHP: 7.4
 WC requires at least: 8.0
 WC tested up to: 9.9
-Stable tag: 1.3.0
+Stable tag: 1.4.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -21,12 +21,13 @@ Fetch for WooCommerce connects your shop to [Fetch](https://fetch.com.cy) throug
 * **Accept, mark ready or reject from WooCommerce.** A "Fetch" box on the order screen sends your decision straight to Fetch, which books the courier.
 * **Optional 1:1 mirror.** Choose **Mirror this shop 1:1** and your Fetch store offers exactly what this shop sells: anything else in it is switched off on Fetch (never deleted).
 * **Instant or polled.** Register the webhook and new orders arrive within seconds; without it the plugin checks for orders every 2 minutes.
+* **Several Fetch stores from one site.** A chain can feed every branch on its Partner API key from one shop, each with its own markup, catalogue mode, categories and order settings. Stock and prices are shared.
 
 == Installation ==
 
 1. Ask Fetch for a Partner API key for your store (developer.fetch.com.cy). You get a client ID and a client secret.
 2. Upload and activate the plugin. WooCommerce must be active.
-3. Go to **WooCommerce → Fetch**, enter the client ID and secret, and press **Connect & load stores**. Pick your Fetch store and save.
+3. Go to **WooCommerce → Fetch**, enter the client ID and secret, and press **Connect & load stores**. Tick **Connect** next to each Fetch store this shop sells in, and save.
 4. Press **Sync all products now** to send your catalogue the first time.
 5. Press **Register webhook** so orders arrive instantly (your site must use https).
 6. Optional: turn on **Auto-accept** and set your usual preparation time.
@@ -71,6 +72,16 @@ Press **Preview** first to see how many Fetch products would be switched off, wi
 
 Fetch decides how these appear on your Fetch store, so nothing changes for products Fetch already curates.
 
+= Can one shop feed several Fetch stores? =
+
+Yes. After **Connect & load stores**, every Fetch store your key can access is listed with a **Connect** checkbox; tick each branch this shop sells in. Every product change is sent to each connected store, and orders from all of them arrive here, each showing its store in the Fetch box and in a **Fetch store** column of the orders list. Accept, Ready and Reject go to the order's own store.
+
+With two or more stores connected, each one can set its own **price markup**, **catalogue mode** (Mirror this shop 1:1 runs per store and never touches another store), **products** (all, or only some categories; a product that leaves them is switched off in that store), **auto-accept** and **preparation time**. Blank uses the global setting. Credentials, server, brand attribute and the sync and import switches are shared. Each store has its own queue and full sync, so one store's API error does not hold up the others, and a status line per store shows the last full sync, products sent, the last order and sync errors.
+
+**Stock and prices are shared in this version:** every store sells from the same WooCommerce stock and base prices, plus its own markup. An order from any store reduces the one stock, and the new quantity goes to every store. There is no per-branch stock.
+
+One webhook serves every store on the key; orders of stores you have not connected are ignored. Several stores need the Fetch API update that scopes product codes (references) per store, which Fetch is rolling out alongside this release. Upgrading from 1.3.0 needs nothing: your store stays connected with the same settings and product data.
+
 = What about stock? =
 
 If WooCommerce manages stock for a product, Fetch gets the exact quantity. If it does not, the product sells on Fetch without a stock limit, and "Out of stock" switches it off on Fetch.
@@ -88,6 +99,14 @@ Both run. The webhook delivers new orders in seconds and is verified with a sign
 WooCommerce → Fetch shows recent activity. The full log is under WooCommerce → Status → Logs, source "fetch". Each product also stores its last sync result.
 
 == Changelog ==
+
+= 1.4.0 =
+* New: **several Fetch stores from one site.** After "Connect & load stores", tick every Fetch store this shop sells in. Products, prices and stock go to each of them, and their orders come here, tagged with the store.
+* New: per-store price markup, catalogue mode (Mirror this shop 1:1 and Preview per store), category filter, auto-accept and preparation time, each falling back to the global setting.
+* New: a status line per store (last full sync, products sent, last order, sync errors), a "Fetch store" line in the order's Fetch box, and a "Fetch store" column in the orders list when more than one store is connected.
+* Each store has its own sync queue and full sync, so one store's API error does not hold up the others. Stock and prices are shared across stores; only the markup can differ.
+* Upgrading from 1.3.0 needs no changes: your store stays connected with the same settings and product data.
+* Several stores need the Fetch API update that scopes product codes (references) per store, which Fetch is rolling out alongside this release.
 
 = 1.3.0 =
 * New: product **specifications**. Every attribute shown on the product page, global or custom, is sent to Fetch with its label and values, in your order. Variations sent as separate Fetch products carry their parent's specifications.
