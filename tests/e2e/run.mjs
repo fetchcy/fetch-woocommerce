@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startPlayground, wpFetch } from './playground.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const plugin = path.resolve(here, '../..');
@@ -12,9 +13,6 @@ const MOCK = 'http://127.0.0.1:9099';
 const results = [];
 const ok = (label, cond, extra) => { results.push([cond ? 'PASS' : 'FAIL', label]); console.log(`${cond ? 'PASS' : 'FAIL'} ${label}${!cond && extra !== undefined ? ' → ' + JSON.stringify(extra).slice(0, 600) : ''}`); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Playground auto-logs-in by 302-redirecting any request without this cookie
-// back to itself; fetch drops cookies, so without it every call loops.
-const wpFetch = (url, opts = {}) => fetch(url, { ...opts, redirect: 'manual', signal: AbortSignal.timeout(120000), headers: { ...(opts.headers || {}), cookie: 'playground_auto_login_already_happened=1' } });
 const mockLog = () => JSON.parse(fs.readFileSync(path.join(here, 'mock-requests.json'), 'utf8'));
 const productPuts = () => mockLog().requests.filter((r) => r.method === 'PUT' && r.path.endsWith('/products'));
 const setStatus = (orderId, status) => fetch(`${MOCK}/__set-status`, { method: 'POST', body: JSON.stringify({ orderId, status }) });
@@ -28,13 +26,10 @@ function postWebhook(event, eventId, data) {
 
 const REUSE = !!process.env.E2E_REUSE; // reuse an already-running mock + Playground
 const mock = REUSE ? null : spawn('node', [path.join(here, 'mock-fetch.mjs')], { stdio: 'inherit' });
-const pg = REUSE ? null : spawn('npx', ['--yes', '@wp-playground/cli@latest', 'server', '--port=9400', `--blueprint=${path.join(here, 'blueprint.json')}`,
-  `--mount=${plugin}:/wordpress/wp-content/plugins/fetch-woocommerce`, `--mount=${here}:/wordpress/e2e`], { stdio: ['ignore', 'pipe', 'pipe'] });
-pg?.stdout.on('data', (d) => process.stdout.write('[pg] ' + d));
-pg?.stderr.on('data', (d) => process.stdout.write('[pg!] ' + d));
+const pg = REUSE ? null : startPlayground(here, plugin);
 const cleanup = () => { try { pg?.kill('SIGTERM'); } catch {} try { mock?.kill(); } catch {} };
 process.on('exit', cleanup);
-setTimeout(() => { console.log('E2E HARD TIMEOUT'); for (const r of results) console.log(r.join(' ')); cleanup(); process.exit(3); }, 12 * 60 * 1000).unref();
+setTimeout(() => { console.log('E2E HARD TIMEOUT'); for (const r of results) console.log(r.join(' ')); cleanup(); process.exit(3); }, 30 * 60 * 1000).unref();
 
 async function step(name, params = {}, retry = true) {
   const r = await wpFetch(`${WP}/e2e/e2e-driver.php?${new URLSearchParams({ step: name, ...params })}`);
@@ -373,12 +368,112 @@ try {
   ok('an attribute the shop does not have saves as Automatic', ct.unknown_saved_as === '', ct.unknown_saved_as);
   ok('content payloads pass the live rules', mockLog().problems.length === 0, mockLog().problems);
 
+  // --- 1.4.0: several Fetch stores from one site --------------------------------------------
+  // The key sees three stores; the shop connects two: store-1 (all products, the default 10%
+  // markup) and store-2 (only Dogs, 20%). store-3 is never connected.
+  const reqs = () => mockLog().requests;
+  const rowsTo = (store, from = 0) => reqs().slice(from).filter((r) => r.method === 'PUT' && r.path === `/api/v1/partner/stores/${store}/products`).flatMap((r) => r.body.products);
+  const lastTo = (rows, ref) => rows.filter((x) => x.ref === ref).at(-1);
+  const touched3 = (from = 0) => reqs().slice(from).filter((r) => r.path.includes('/stores/store-3/'));
+  const listingsIn = async (store) => Object.fromEntries((await (await fetch(`${MOCK}/__listings?store=${store}`)).json()).map((l) => [l.listingId, l]));
+
+  let r0 = reqs().length;
+  const ms = await step('multi_setup');
+  ok('multi: "Connect & load stores" lists every store the key can access', JSON.stringify(ms.listed) === '["store-1","store-2","store-3"]' && /3 stores found/.test(ms.connect_notice || ''), { listed: ms.listed, notice: ms.connect_notice });
+  ok('multi: each store has a "Connect" checkbox; the previously chosen store is ticked', JSON.stringify(ms.choices) === '[["store-1",true],["store-2",false],["store-3",false]]', ms.choices);
+  ok('multi: two stores connected, each with its own markup and category filter; the first stays primary', JSON.stringify(Object.keys(ms.stores)) === '["store-1","store-2"]' && ms.stores['store-1'].markup === 10 && ms.stores['store-2'].markup === 20 && ms.stores['store-2'].categories[0] === ms.ids.dogs && ms.stores['store-2'].name === 'Branch B' && ms.primary === 'store-1', ms.stores);
+  ok('multi: connecting a second store starts its full sync only (job carries its store)', JSON.stringify(ms.bulk) === '[{"page":1,"store":"store-2"}]' && /being sent to the Fetch stores/.test(ms.save_notice || ''), { bulk: ms.bulk, notice: ms.save_notice });
+  let b2 = rowsTo('store-2', r0);
+  ok('multi: store-2\'s full sync sends only its categories (a Dogs subcategory), at its 20% markup', JSON.stringify([...new Set(b2.map((x) => x.ref))]) === '["DOG-KIB"]' && lastTo(b2, 'DOG-KIB')?.price === '24.00' && lastTo(b2, 'DOG-KIB')?.stockCount === 10, b2.map((x) => `${x.ref} ${x.price}`));
+  ok('multi: the first store keeps getting everything at the default 10%', lastTo(rowsTo('store-1', r0), 'DOG-KIB')?.price === '22.00' && lastTo(rowsTo('store-1', r0), 'CAT-TOY')?.price === '5.50', rowsTo('store-1', r0).map((x) => `${x.ref} ${x.price}`));
+  ok('multi: nothing reaches the store that is not connected', touched3(0).length === 0, touched3(0));
+  ok('multi: store-2 log lines carry its name', ms.log.some((m) => /^\[Branch B\] Full product sync finished\.$/.test(m)) && ms.log.some((m) => /^\[Branch B\] Synced \d+ product\(s\) to Fetch/.test(m)), ms.log);
+
+  r0 = reqs().length;
+  const mp = await step('multi_products');
+  ok('multi: a new product is queued once per store that takes it', JSON.stringify(mp.pending['store-1']) === JSON.stringify([mp.ids.bowl, mp.ids.bed]) && JSON.stringify(mp.pending['store-2']) === JSON.stringify([mp.ids.bowl]), mp.pending);
+  ok('multi: one flush job per store (the first store keeps the 1.3.0 arguments)', mp.flush_jobs.length === 2 && mp.flush_jobs.some((a) => JSON.stringify(a) === '[]') && mp.flush_jobs.some((a) => a.store === 'store-2'), mp.flush_jobs);
+  const mp1 = rowsTo('store-1', r0);
+  const mp2 = rowsTo('store-2', r0);
+  ok('multi: right products and prices reach each store (Dog Bowl 8 → 8.80 / 9.60, Cat Bed only to store-1)', lastTo(mp1, 'DOG-BOWL')?.price === '8.80' && lastTo(mp1, 'CAT-BED')?.price === '33.00' && lastTo(mp2, 'DOG-BOWL')?.price === '9.60' && !mp2.some((x) => x.ref === 'CAT-BED'), { mp1: mp1.map((x) => `${x.ref} ${x.price}`), mp2: mp2.map((x) => `${x.ref} ${x.price}`) });
+  ok('multi: same ref in both stores; Fetch product id kept per store', mp.meta.bowl[0] === 'prod-DOG-BOWL' && mp.meta.bowl[1] === 'prod-DOG-BOWL' && mp.meta.bowl[2] === 'DOG-BOWL' && mp.meta.bed[0] === 'prod-CAT-BED' && mp.meta.bed[1] === '', mp.meta);
+  ok('multi: settings show each store\'s own fields and a status row (last full sync, products sent, last order, errors)', JSON.stringify(mp.sections) === '["Mock Shop","Branch B"]' && JSON.stringify(mp.store_markups) === '["","20"]' && /Last full sync: (?!not yet)/.test(mp.status['store-2'] || '') && /Products sent: 2 /.test(mp.status['store-2'] || '') && /Last order: not yet/.test(mp.status['store-2'] || '') && /Products with a sync error: 0/.test(mp.status['store-2'] || ''), { sections: mp.sections, markups: mp.store_markups, status: mp.status });
+  ok('multi: still nothing reaches store-3', touched3(0).length === 0, touched3(0));
+
+  // An order from store B (store-2), and one from store-3 that the shop does not serve.
+  const orderB = { ...order, orderId: 'ord-b1', orderNumber: 'B-1001', storeId: 'store-2', items: [{ listingId: 'lst-DOG-BOWL', ref: 'DOG-BOWL', name: 'Dog Bowl', variantName: null, quantity: 2, unitPrice: '9.60', totalPrice: '19.20', vatRate: '19' }], subtotal: '19.20', total: '21.65' };
+  await seedOrder(orderB);
+  await seedOrder({ ...orderB, orderId: 'ord-c2', orderNumber: 'C-2001', storeId: 'store-3' });
+  r0 = reqs().length;
+  const mo = await step('multi_order');
+  const accB = reqs().slice(r0).filter((r) => /\/orders\/ord-b1\/accept$/.test(r.path));
+  ok('multi: the poll imports store-2\'s order, tagged with store-2', mo.found === true && JSON.stringify(mo.store_meta) === '["store-2","Branch B"]' && mo.notes.some((n) => /^Fetch order B-1001 for Branch B imported/.test(n)), mo);
+  ok('multi: each connected store is polled, store-3 is not', reqs().slice(r0).some((r) => r.path === '/api/v1/partner/stores/store-1/orders') && reqs().slice(r0).some((r) => r.path === '/api/v1/partner/stores/store-2/orders') && touched3(r0).length === 0 && mo.store3_order === false, reqs().slice(r0).map((r) => r.path));
+  ok('multi: order box shows the store; orders list has a "Fetch store" column', /Fetch store:<\/strong> <span class="fetch-wc-store">Branch B<\/span>/.test(mo.box) && JSON.stringify(mo.columns) === '["order_number","order_status","fetch_store","order_total"]' && /Branch B/.test(mo.column), { columns: mo.columns, column: mo.column });
+  ok('multi: Accept goes to the order\'s own store (store-2)', mo.accept_error === null && accB.length === 1 && accB[0].path === '/api/v1/partner/stores/store-2/orders/ord-b1/accept' && accB[0].body.prepMinutes === 12 && mo.status[0] === 'processing' && mo.status[1] === 'ACCEPTED', { accB, status: mo.status });
+  const ms1 = rowsTo('store-1', r0);
+  const ms2 = rowsTo('store-2', r0);
+  ok('multi: stock is shared: store-2\'s order reduces Woo stock once (10 → 8), and 8 goes to both stores', mo.stock === 8 && mo.pending["store-1"].includes(mp.ids.bowl) && mo.pending['store-2'].includes(mp.ids.bowl) && lastTo(ms1, 'DOG-BOWL')?.stockCount === 8 && lastTo(ms2, 'DOG-BOWL')?.stockCount === 8, { stock: mo.stock, pending: mo.pending, ms1: lastTo(ms1, 'DOG-BOWL'), ms2: lastTo(ms2, 'DOG-BOWL') });
+
+  // Webhooks: one URL and secret for the key; routed by the payload's storeId.
+  r = await postWebhook('order.created', 'evt_b2', { ...orderB, orderId: 'ord-b2', orderNumber: 'B-1002' });
+  const wb = await step('order_info', { order: 'ord-b2' });
+  ok('multi: a webhook for store-2 is imported as store-2\'s order', r.status === 200 && wb.count === 1 && wb.order?.notes.some((n) => /for Branch B imported/.test(n)), { http: r.status, wb });
+  r = await postWebhook('order.created', 'evt_c1', { ...orderB, orderId: 'ord-c1', orderNumber: 'C-2002', storeId: 'store-3' });
+  const rb = await r.json();
+  const wc = await step('order_info', { order: 'ord-c1' });
+  ok('multi: a webhook for a store that is not connected is acknowledged and ignored', r.status === 200 && rb.ignored === 'store not connected' && wc.count === 0, { http: r.status, rb, count: wc.count });
+  await setStatus('ord-b1', 'DELIVERED');
+  await setStatus('ord-b2', 'DELIVERED');
+
+  // The webhook order's stock change is queued for both stores; send it while both answer.
+  r0 = reqs().length;
+  await step('multi_flush', { store: 'store-1' });
+  const fl2 = await step('multi_flush', { store: 'store-2' });
+  ok('multi: the webhook order from store-2 (2 bowls, 8 → 6) is shared stock too: 6 reaches both stores', lastTo(rowsTo('store-1', r0), 'DOG-BOWL')?.stockCount === 6 && lastTo(rowsTo('store-2', r0), 'DOG-BOWL')?.stockCount === 6 && fl2.pending.length === 0 && fl2.pending_2.length === 0, { s1: lastTo(rowsTo('store-1', r0), 'DOG-BOWL'), s2: lastTo(rowsTo('store-2', r0), 'DOG-BOWL'), fl2 });
+
+  // One store's API error does not block the other.
+  await control('fail-puts', { fail: true, store: 'store-1' });
+  r0 = reqs().length;
+  const mi = await step('multi_isolation');
+  await control('fail-puts', { fail: false });
+  ok('multi: store-1 unreachable: its change stays queued, with its error on its status row', JSON.stringify(mi.pending['store-1']) === JSON.stringify([ms.ids.kibble]) && /HTTP 503/.test(mi.status['store-1'].last_error || '') && mi.meta[0] === 'error', mi);
+  ok('multi: store-2 is not blocked: the new price (25 → 30.00) arrives, its status has no error', lastTo(rowsTo('store-2', r0), 'DOG-KIB')?.price === '30.00' && mi.pending['store-2'].length === 0 && !mi.status['store-2'].last_error && mi.meta[1] === 'synced', { rows: rowsTo('store-2', r0), status: mi.status['store-2'] });
+  ok('multi: the ignored store is logged once (not per order)', mi.ignored_logged === 1, mi.ignored_logged);
+  ok('multi: errors are logged with the store\'s name', mi.log.some((m) => /^\[Mock Shop\] Product sync failed for \d+ product\(s\): HTTP 503/.test(m)), mi.log);
+  r0 = reqs().length;
+  const mf = await step('multi_flush', { store: 'store-1' });
+  ok('multi: store-1 catches up once Fetch answers (27.50)', lastTo(rowsTo('store-1', r0), 'DOG-KIB')?.price === '27.50' && mf.pending.length === 0, rowsTo('store-1', r0));
+
+  // Mirror on store A (store-1) only.
+  await seedListings([{ listingId: 'a-only', ref: 'A-ONLY', name: 'Store A extra', price: '3.00' }]);
+  await fetch(`${MOCK}/__seed-listings`, { method: 'POST', body: JSON.stringify({ store: 'store-2', listings: [{ listingId: 'b-only', ref: 'B-ONLY', name: 'Store B extra', price: '3.00' }] }) });
+  r0 = reqs().length;
+  const mm = await step('multi_mirror');
+  const mmReqs = reqs().slice(r0);
+  const LA = await listingsIn('store-1');
+  const LB = await listingsIn('store-2');
+  ok('multi: catalogue mode per store: store-1 mirrors, store-2 and the default do not', JSON.stringify(mm.modes) === '[true,false,false]' && JSON.stringify(mm.preview_buttons) === '["store-1"]' && mm.preview_store === 'store-1' && /^\[Mock Shop\] Preview: /.test(mm.preview_notice || ''), mm);
+  ok('multi: mirror on store-1 switches off its own extra listing', LA['a-only']?.isActive === false && mmReqs.some((x) => x.path === '/api/v1/partner/stores/store-1/listings/batch' && x.body.items.some((i) => i.listingId === 'a-only')) && mm.log.some((m) => /^\[Mock Shop\] Mirror finished: .*switched off [1-9]\d*, 0 errors\.$/.test(m)), { a: LA['a-only'], log: mm.log });
+  ok('multi: …and never touches store-2 (no scan, no switch-off; its extra listing stays on)', LB['b-only']?.isActive === true && !mmReqs.some((x) => x.path.startsWith('/api/v1/partner/stores/store-2/listings')) && !mm.log.some((m) => /^\[Branch B\] Mirror/.test(m)), { b: LB['b-only'], paths: [...new Set(mmReqs.map((x) => x.path))] });
+  ok('multi: store-2\'s full sync keeps its category filter (Cat products never sent there)', !rowsTo('store-2', 0).some((x) => /^CAT-/.test(x.ref)) && touched3(0).length === 0, [...new Set(rowsTo('store-2', 0).map((x) => x.ref))]);
+  ok('multi: store-1 back on the default mode', mm.mode_after === false, mm.mode_after);
+
+  const md = await step('multi_disconnect');
+  ok('multi: unticking a store disconnects it and drops its queue', JSON.stringify(md.stores) === '["store-1"]' && md.pending_after === 'gone', md);
+  ok('multi: one store again: no per-store fields, no "Fetch store" column; the status row stays', md.per_store_fields === false && JSON.stringify(md.columns) === '["order_number","order_status"]' && /Last order: /.test(md.status['store-1'] || ''), md);
+  ok('multi: an order keeps showing the store it came from after that store is disconnected', md.order_b_store === 'Branch B', md.order_b_store);
+  ok('multi-store requests pass the live rules', mockLog().problems.length === 0, mockLog().problems);
+
   const srv = await step('server');
   ok('server select offers Production, Staging, Custom URL', JSON.stringify(srv.options) === '["production","staging","custom"]' && srv.help === true, srv);
   ok('existing "custom" server kept, its URL field shown', srv.custom_url_kept === 'http://127.0.0.1:9099' && srv.custom_shown === true, srv);
   ok('switching to Staging uses api-stg and clears the cached token', srv.staging_url === 'https://api-stg.fetch.com.cy' && srv.token_before === true && srv.token_after === false, srv);
   ok('Staging selected hides the custom URL field', srv.staging_selected === true && srv.custom_hidden === true, srv);
   ok('unknown server value saves as Production', srv.garbage_saved_as === 'production' && srv.production_url === 'https://api.fetch.com.cy', srv);
+
+  const fc = await step('fresh_connect');
+  ok('fresh connection: "Connect & load stores" connects the first store; ticking it in the form keeps it', fc.before[0] === false && JSON.stringify(fc.after) === '[true,"store-1",["store-1"]]' && JSON.stringify(fc.final) === '[true,"store-1",["store-1"]]', fc);
 } catch (e) {
   console.error('E2E ERROR', e);
   results.push(['FAIL', 'runner error: ' + e.message]);

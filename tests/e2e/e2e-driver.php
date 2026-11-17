@@ -59,12 +59,15 @@ function save_settings( array $fields ) {
 	return is_array( $notice ) ? $notice[1] : null;
 }
 
-/** Post one of the standalone forms (Preview, Apply anyway): action, nonce and "do" only. */
-function post_action( $do ) {
-	$_POST    = array(
-		'action'   => Fetch_WC_Admin::ACTION,
-		'do'       => $do,
-		'_wpnonce' => wp_create_nonce( Fetch_WC_Admin::ACTION ),
+/** Post one of the standalone forms (Preview, Apply anyway): action, nonce, "do" and, per store, "store". */
+function post_action( $do, array $extra = array() ) {
+	$_POST    = array_merge(
+		array(
+			'action'   => Fetch_WC_Admin::ACTION,
+			'do'       => $do,
+			'_wpnonce' => wp_create_nonce( Fetch_WC_Admin::ACTION ),
+		),
+		$extra
 	);
 	$_REQUEST = $_POST;
 	$redirect = static function ( $location ) {
@@ -95,6 +98,50 @@ function run_full_sync() {
 			break;
 		}
 	}
+}
+
+/** Save the 1.4.0 settings form: the store list with its "Connect" ticks and per-store fields. */
+function save_stores( array $rows, array $fields = array() ) {
+	return save_settings( array_merge( array( 'stores_form' => '1', 'stores' => $rows ), $fields ) );
+}
+
+/** One store's full sync, its Action Scheduler pages run here, to the end. */
+function run_bulk( $store_id ) {
+	as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+	for ( $page = 1; $page <= 100; $page++ ) {
+		Fetch_WC_Product_Sync::bulk_page( $page, $store_id );
+		$more = as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, Fetch_WC_Settings::job_args( $store_id, array( 'page' => $page + 1 ) ), Fetch_WC_Product_Sync::GROUP );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		if ( ! $more ) {
+			break;
+		}
+	}
+}
+
+function scheduled_args( $hook ) {
+	$actions = as_get_scheduled_actions( array( 'hook' => $hook, 'status' => ActionScheduler_Store::STATUS_PENDING, 'group' => Fetch_WC_Product_Sync::GROUP, 'per_page' => 50 ) );
+	return array_values( array_map( function ( $a ) { return $a->get_args(); }, $actions ) );
+}
+
+function make_in_category( $name, $sku, $price, $stock, $term_id ) {
+	$p = new WC_Product_Simple();
+	$p->set_name( $name );
+	$p->set_sku( $sku );
+	$p->set_regular_price( $price );
+	$p->set_manage_stock( true );
+	$p->set_stock_quantity( $stock );
+	$p->set_category_ids( array( $term_id ) );
+	$p->set_status( 'publish' );
+	return $p->save();
+}
+
+function store_status_cells( $html ) {
+	preg_match_all( '#<div class="fetch-wc-store" data-store="([^"]+)">.*?<td class="fetch-wc-store-status">(.*?)</td>#s', $html, $m, PREG_SET_ORDER );
+	$out = array();
+	foreach ( $m as $row ) {
+		$out[ $row[1] ] = html_entity_decode( wp_strip_all_tags( str_replace( '<br>', ' | ', $row[2] ) ) );
+	}
+	return $out;
 }
 
 /** A Polylang language, through whichever API this Polylang version has. */
@@ -713,6 +760,216 @@ switch ( $step ) {
 		save_settings( array( 'brand_attribute' => 'pa_nope' ) );
 		$out['unknown_saved_as'] = Fetch_WC_Settings::get( 'brand_attribute' );
 		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		break;
+
+	// --- 1.4.0: several Fetch stores from one site ------------------------------------------
+	case 'multi_setup':
+		// Categories with a parent: Dogs > Dog food, Dogs > Bowls, and Cats.
+		$dogs  = wp_insert_term( 'Dogs', 'product_cat' );
+		$food  = wp_insert_term( 'Dog food', 'product_cat', array( 'parent' => $dogs['term_id'] ) );
+		$bowls = wp_insert_term( 'Bowls', 'product_cat', array( 'parent' => $dogs['term_id'] ) );
+		$cats  = wp_insert_term( 'Cats', 'product_cat' );
+		$ids   = array(
+			'dogs'   => (int) $dogs['term_id'],
+			'food'   => (int) $food['term_id'],
+			'bowls'  => (int) $bowls['term_id'],
+			'cats'   => (int) $cats['term_id'],
+			'kibble' => make_in_category( 'Dog Kibble', 'DOG-KIB', '20', 10, $food['term_id'] ),
+			'toy'    => make_in_category( 'Cat Toy', 'CAT-TOY', '5', 4, $cats['term_id'] ),
+		);
+		update_option( 'e2e_multi', $ids, false );
+		Fetch_WC_Product_Sync::flush(); // Only the first store is connected so far.
+		$out['ids'] = $ids;
+
+		// "Connect & load stores": the key sees three stores.
+		$out['connect_notice'] = save_settings( array( 'do' => 'connect' ) );
+		$out['listed']         = wp_list_pluck( (array) get_transient( 'fetch_wc_stores_' . get_current_user_id() ), 'id' );
+		$html                  = render_page();
+		preg_match_all( '#name="stores\[(\d+)\]\[id\]" value="([^"]+)">\s*<input type="checkbox" name="stores\[\d+\]\[connect\]" value="yes"\s*(checked=\'checked\')?#', $html, $m, PREG_SET_ORDER );
+		$out['choices']        = array_map( function ( $r ) { return array( $r[2], ! empty( $r[3] ) ); }, $m );
+
+		// Tick the first two; the second sells only Dogs, at its own 20% markup.
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['save_notice'] = save_stores(
+			array(
+				array( 'id' => 'store-1', 'connect' => 'yes' ),
+				array( 'id' => 'store-2', 'connect' => 'yes', 'price_markup' => '20', 'categories' => array( (string) $ids['dogs'] ) ),
+				array( 'id' => 'store-3' ),
+			)
+		);
+		$out['stores']  = array_map( function ( $s ) { return array( 'markup' => Fetch_WC_Settings::store_markup( $s['id'] ), 'categories' => $s['categories'], 'name' => $s['name'] ); }, Fetch_WC_Settings::stores() );
+		$out['primary'] = Fetch_WC_Settings::get( 'store_id' );
+		$out['bulk']    = scheduled_args( Fetch_WC_Product_Sync::BULK_HOOK );
+		run_bulk( 'store-2' );
+		$out['log'] = recent_log( 6 );
+		break;
+
+	case 'multi_products':
+		$ids         = get_option( 'e2e_multi' );
+		$ids['bowl'] = make_in_category( 'Dog Bowl', 'DOG-BOWL', '8', 10, $ids['bowls'] );
+		$ids['bed']  = make_in_category( 'Cat Bed', 'CAT-BED', '30', 2, $ids['cats'] );
+		update_option( 'e2e_multi', $ids, false );
+		$out['pending'] = array(
+			'store-1' => array_keys( get_option( 'fetch_wc_pending_products', array() ) ),
+			'store-2' => array_keys( get_option( 'fetch_wc_pending_products_store-2', array() ) ),
+		);
+		$out['flush_jobs'] = scheduled_args( Fetch_WC_Product_Sync::FLUSH_HOOK );
+		$out['ids']        = $ids;
+		Fetch_WC_Product_Sync::flush( 'store-1' );
+		Fetch_WC_Product_Sync::flush( 'store-2' );
+		$out['meta'] = array(
+			'bowl' => array( get_post_meta( $ids['bowl'], '_fetch_product_id', true ), get_post_meta( $ids['bowl'], '_fetch_product_id_store-2', true ), get_post_meta( $ids['bowl'], '_fetch_ref', true ) ),
+			'bed'  => array( get_post_meta( $ids['bed'], '_fetch_product_id', true ), get_post_meta( $ids['bed'], '_fetch_product_id_store-2', true ) ),
+		);
+		$html                 = render_page();
+		$out['status']        = store_status_cells( $html );
+		$out['store_markups'] = preg_match_all( '#name="stores\[(\d+)\]\[price_markup\]"[^>]*value="([^"]*)"#', $html, $mm ) ? $mm[2] : array();
+		$out['sections']      = preg_match_all( '#<h3>([^<]+)</h3>#', $html, $hh ) ? $hh[1] : array();
+		break;
+
+	case 'multi_order':
+		$ids = get_option( 'e2e_multi' );
+		Fetch_WC_Order_Sync::poll();
+		$order               = Fetch_WC_Order_Sync::find( 'ord-b1' );
+		$out['found']        = (bool) $order;
+		$out['store_meta']   = $order ? array( $order->get_meta( '_fetch_store_id' ), $order->get_meta( '_fetch_store_name' ) ) : null;
+		$out['stock']        = product_stock( $ids['bowl'] );
+		$out['pending']      = array(
+			'store-1' => array_keys( get_option( 'fetch_wc_pending_products', array() ) ),
+			'store-2' => array_keys( get_option( 'fetch_wc_pending_products_store-2', array() ) ),
+		);
+		Fetch_WC_Product_Sync::flush( 'store-1' );
+		Fetch_WC_Product_Sync::flush( 'store-2' );
+		ob_start();
+		Fetch_WC_Order_Actions::render( $order );
+		$out['box'] = ob_get_clean();
+		$out['columns'] = array_keys( apply_filters( 'manage_woocommerce_page_wc-orders_columns', array( 'order_number' => 'Order', 'order_status' => 'Status', 'order_total' => 'Total' ) ) );
+		ob_start();
+		do_action( 'manage_woocommerce_page_wc-orders_custom_column', 'fetch_store', $order );
+		$out['column'] = ob_get_clean();
+		$out['accept_error'] = Fetch_WC_Order_Actions::run( $order, 'accept', array( 'prepMinutes' => 12 ) );
+		$order               = wc_get_order( $order->get_id() );
+		$out['status']       = array( $order->get_status(), $order->get_meta( '_fetch_status' ) );
+		$out['notes']        = array_map( function ( $n ) { return $n->content; }, wc_get_order_notes( array( 'order_id' => $order->get_id() ) ) );
+		$out['store3_order'] = (bool) Fetch_WC_Order_Sync::find( 'ord-c2' );
+		break;
+
+	case 'multi_isolation':
+		$ids = get_option( 'e2e_multi' );
+		$p   = wc_get_product( $ids['kibble'] );
+		$p->set_regular_price( '25' );
+		$p->save();
+		Fetch_WC_Product_Sync::flush( 'store-1' ); // Answers 503.
+		Fetch_WC_Product_Sync::flush( 'store-2' );
+		$out['pending'] = array(
+			'store-1' => array_keys( get_option( 'fetch_wc_pending_products', array() ) ),
+			'store-2' => array_keys( get_option( 'fetch_wc_pending_products_store-2', array() ) ),
+		);
+		$out['status'] = array(
+			'store-1' => Fetch_WC_Settings::store_status( 'store-1' ),
+			'store-2' => Fetch_WC_Settings::store_status( 'store-2' ),
+		);
+		$out['meta']   = array( get_post_meta( $ids['kibble'], '_fetch_sync_status', true ), get_post_meta( $ids['kibble'], '_fetch_sync_status_store-2', true ) );
+		$out['log']    = recent_log( 4 );
+		$out['ignored_logged'] = count( array_filter( array_column( Fetch_WC_Logger::activity(), 'message' ), function ( $m ) { return 0 === strpos( $m, 'Ignored Fetch orders from store store-3' ); } ) );
+		break;
+
+	case 'multi_flush':
+		Fetch_WC_Product_Sync::flush( isset( $_GET['store'] ) ? (string) $_GET['store'] : null );
+		$out['pending'] = array_keys( get_option( 'fetch_wc_pending_products', array() ) );
+		$out['pending_2'] = array_keys( get_option( 'fetch_wc_pending_products_store-2', array() ) );
+		break;
+
+	case 'multi_mirror':
+		// Store A (store-1) mirrors this shop; store B keeps the default, add and update only.
+		$rows = array(
+			array( 'id' => 'store-1', 'connect' => 'yes', 'catalogue_mode' => 'mirror' ),
+			array( 'id' => 'store-2', 'connect' => 'yes', 'price_markup' => '20', 'categories' => array( (string) get_option( 'e2e_multi' )['dogs'] ) ),
+		);
+		$out['notice'] = save_stores( $rows );
+		$out['modes']  = array( Fetch_WC_Settings::store_mirror( 'store-1' ), Fetch_WC_Settings::store_mirror( 'store-2' ), Fetch_WC_Settings::mirror() );
+		$html          = render_page();
+		$out['preview_buttons'] = preg_match_all( '#form="fetch_wc_mirror_preview_form" class="button" name="store" value="([^"]+)"#', $html, $pb ) ? $pb[1] : array();
+		$out['preview_notice'] = post_action( 'mirror_preview', array( 'store' => 'store-1' ) );
+		$out['preview_store']  = get_transient( 'fetch_wc_mirror_preview_' . get_current_user_id() )['store'];
+		run_bulk( 'store-1' );
+		run_bulk( 'store-2' );
+		$out['log']     = recent_log( 8 );
+		$out['pending'] = array( Fetch_WC_Mirror::pending( 'store-1' ), Fetch_WC_Mirror::pending( 'store-2' ) );
+		$rows[0]['catalogue_mode'] = '';
+		save_stores( $rows );
+		$out['mode_after'] = Fetch_WC_Settings::store_mirror( 'store-1' );
+		break;
+
+	case 'multi_disconnect':
+		$out['pending_before'] = get_option( 'fetch_wc_pending_products_store-2', 'none' );
+		update_option( 'fetch_wc_pending_products_store-2', array( 1 => true ), false );
+		$out['notice'] = save_stores( array( array( 'id' => 'store-1', 'connect' => 'yes' ), array( 'id' => 'store-2' ), array( 'id' => 'store-3' ) ) );
+		$out['stores']        = array_keys( Fetch_WC_Settings::stores() );
+		$out['pending_after'] = get_option( 'fetch_wc_pending_products_store-2', 'gone' );
+		$out['columns']       = array_keys( apply_filters( 'manage_woocommerce_page_wc-orders_columns', array( 'order_number' => 'Order', 'order_status' => 'Status' ) ) );
+		$html                 = render_page();
+		$out['per_store_fields'] = false !== strpos( $html, '[price_markup]' );
+		$out['status']           = store_status_cells( $html );
+		$out['order_b_store']    = Fetch_WC_Order_Actions::store_label( Fetch_WC_Order_Sync::find( 'ord-b1' ) );
+		break;
+
+	case 'fresh_connect':
+		// After the server step cleared the store: a fresh connection through the form.
+		$out['before']  = array( Fetch_WC_Settings::is_connected(), Fetch_WC_Settings::get( 'store_id' ) );
+		$out['notice']  = save_settings( array( 'environment' => 'custom', 'custom_base_url' => 'http://127.0.0.1:9099', 'do' => 'connect' ) );
+		$out['after']   = array( Fetch_WC_Settings::is_connected(), Fetch_WC_Settings::get( 'store_id' ), array_keys( Fetch_WC_Settings::stores() ) );
+		$out['saved']   = save_stores( array( array( 'id' => 'store-1', 'connect' => 'yes' ), array( 'id' => 'store-2' ), array( 'id' => 'store-3' ) ) );
+		$out['final']   = array( Fetch_WC_Settings::is_connected(), Fetch_WC_Settings::get( 'store_id' ), array_keys( Fetch_WC_Settings::stores() ) );
+		break;
+
+	// --- Upgrade from 1.3.0 (tests/e2e/upgrade.mjs) ----------------------------------------
+	case 'version':
+		$out['version'] = FETCH_WC_VERSION;
+		$out['settings'] = Fetch_WC_Settings::all();
+		$out['pending']  = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		break;
+
+	case 'upgrade_queue_bulk':
+		// Runs on 1.3.0: a full sync waiting in Action Scheduler when the update lands.
+		Fetch_WC_Product_Sync::start_bulk_sync();
+		$out['bulk'] = scheduled_args( Fetch_WC_Product_Sync::BULK_HOOK );
+		break;
+
+	case 'upgrade_check':
+		$id = wc_get_product_id_by_sku( 'CBL-001' );
+		// The job 1.3.0 queued, run the way Action Scheduler runs it.
+		$legacy = scheduled_args( Fetch_WC_Product_Sync::BULK_HOOK );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		if ( $legacy ) {
+			do_action_ref_array( Fetch_WC_Product_Sync::BULK_HOOK, array_values( $legacy[0] ) );
+		}
+		$out['legacy_bulk_next'] = 1 === count( $legacy ) && as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, array( 'page' => 2 ), Fetch_WC_Product_Sync::GROUP );
+		$out['pending_before_change'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['version']   = FETCH_WC_VERSION;
+		$out['connected'] = Fetch_WC_Settings::is_connected();
+		$out['stores']    = array_map( function ( $s ) { return array( $s['name'], Fetch_WC_Settings::store_markup( $s['id'] ) ); }, Fetch_WC_Settings::stores() );
+		$out['meta']      = array( get_post_meta( $id, '_fetch_product_id', true ), get_post_meta( $id, '_fetch_ref', true ), get_post_meta( $id, '_fetch_sync_status', true ) );
+		wc_update_product_stock( $id, 3 );
+		$out['pending'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		$out['flush_scheduled'] = as_has_scheduled_action( Fetch_WC_Product_Sync::FLUSH_HOOK, array(), Fetch_WC_Product_Sync::GROUP );
+		Fetch_WC_Product_Sync::flush();
+		$out['pending_after_flush'] = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
+		$out['status_after']        = get_post_meta( $id, '_fetch_sync_status', true );
+		$html                = render_page();
+		$out['ticked']       = (bool) preg_match( '#value="store-1">\s*<input type="checkbox" name="stores\[0\]\[connect\]" value="yes"\s*checked#', $html );
+		$out['status_cell']  = store_status_cells( $html );
+		// Saving the 1.4.0 form unchanged keeps the store and resends nothing.
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['save_notice'] = save_stores( array( array( 'id' => 'store-1', 'connect' => 'yes' ) ) );
+		$out['after_save']  = array( Fetch_WC_Settings::is_connected(), Fetch_WC_Settings::get( 'store_id' ), array_keys( Fetch_WC_Settings::stores() ), Fetch_WC_Settings::store_markup( 'store-1' ), as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP ) );
+		$order               = Fetch_WC_Order_Sync::find( 'ord-1' );
+		$out['accept_error'] = Fetch_WC_Order_Actions::run( $order, 'accept', array( 'prepMinutes' => 10 ) );
+		Fetch_WC_Order_Sync::poll();
+		$out['orders'] = count( wc_get_orders( array( 'limit' => -1, 'meta_key' => '_fetch_order_id', 'meta_value' => 'ord-1' ) ) );
+		run_full_sync();
+		$out['log'] = recent_log( 5 );
 		break;
 
 	case 'render_box':

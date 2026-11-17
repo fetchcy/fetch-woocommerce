@@ -1,24 +1,31 @@
 // Minimal mock of the Fetch Partner API for the e2e test. Records every request.
 // Applies the live PUT /products and listings/batch rules: price on every row,
-// at most 200 rows and 500 KB per request. Keeps the store's listings so
+// at most 200 rows and 500 KB per request. Keeps each store's listings so
 // GET /listings pages through what PUT /products and listings/batch wrote.
+// One key sees three stores (a chain's branches); refs and listings are per store.
 import http from 'node:http';
 import fs from 'node:fs';
 
 const PORT = Number(process.env.MOCK_PORT || 9099);
 const LOG = process.env.MOCK_LOG || new URL('./mock-requests.json', import.meta.url).pathname;
-const STORE = 'store-1';
+const STORES = [
+  { id: 'store-1', name: 'Mock Shop', city: 'Nicosia', isActive: true },
+  { id: 'store-2', name: 'Branch B', city: 'Limassol', isActive: true },
+  { id: 'store-3', name: 'Branch C', city: 'Larnaca', isActive: true },
+];
+const STORE_IDS = STORES.map((x) => x.id);
 const requests = [];
-const orders = new Map(); // orderId → order
+const orders = new Map(); // orderId → order (its storeId says which store's; none = store-1)
 const problems = [];
-const listings = new Map(); // listingId → listing, in insertion order
+const stores = new Map(STORE_IDS.map((id) => [id, new Map()])); // storeId → (listingId → listing), in insertion order
+const listingsOf = (store) => stores.get(store || 'store-1');
 let failListingsPage = 0; // 1-based page of GET /listings to answer 500, 0 = none
-let failPuts = false; // PUT /products answers 503 (Fetch unreachable)
+let failPuts = false; // PUT /products answers 503 (Fetch unreachable): true for every store, or one store id
 let clock = Date.parse('2026-01-01T00:00:00Z');
 const tick = () => new Date((clock += 1000)).toISOString();
-const byRef = (ref) => [...listings.values()].find((l) => l.ref === ref);
-function upsertListing(p) {
-  const l = byRef(p.ref) || { listingId: `lst-${p.ref}`, productId: `prod-${p.ref}`, variantId: null, ref: p.ref, barcode: null, sku: null, categoryPath: [], salePrice: null, saleEndsAt: null, currency: 'EUR', stockCount: null, trackStock: false };
+const byRef = (listings, ref) => [...listings.values()].find((l) => l.ref === ref);
+function upsertListing(listings, p) {
+  const l = byRef(listings, p.ref) || { listingId: `lst-${p.ref}`, productId: `prod-${p.ref}`, variantId: null, ref: p.ref, barcode: null, sku: null, categoryPath: [], salePrice: null, saleEndsAt: null, currency: 'EUR', stockCount: null, trackStock: false };
   Object.assign(l, { name: p.name, price: p.price, salePrice: p.salePrice ?? null, isActive: p.isActive !== false, updatedAt: tick() });
   if (p.stockCount !== undefined) Object.assign(l, { stockCount: p.stockCount, trackStock: true });
   listings.set(l.listingId, l);
@@ -55,8 +62,10 @@ function validateProduct(p, i) {
   }
 }
 
+// No keep-alive: Playground's PHP network bridge can reuse a socket the server is
+// closing after an idle gap, and that request then never arrives.
 function send(res, code, body) {
-  res.writeHead(code, { 'content-type': 'application/json' });
+  res.writeHead(code, { 'content-type': 'application/json', connection: 'close' });
   res.end(JSON.stringify(body));
 }
 
@@ -79,25 +88,32 @@ const server = http.createServer((req, res) => {
     if (req.method === 'POST' && p === '/__set-status') { const o = orders.get(body.orderId); if (o) o.status = body.status; return send(res, 200, o || {}); }
     // Listings the shop never sent: made in the portal (no ref) or by another integration.
     if (req.method === 'POST' && p === '/__seed-listings') {
+      const listings = listingsOf(body.store);
       for (const x of body.listings) listings.set(x.listingId, { productId: `prod-${x.listingId}`, variantId: null, ref: null, barcode: null, sku: null, categoryPath: [], salePrice: null, saleEndsAt: null, currency: 'EUR', stockCount: null, trackStock: false, isActive: true, ...x, updatedAt: tick() });
       return send(res, 200, { count: listings.size });
     }
     if (req.method === 'POST' && p === '/__fail-listings-page') { failListingsPage = Number(body.page) || 0; return send(res, 200, { failListingsPage }); }
-    if (req.method === 'POST' && p === '/__fail-puts') { failPuts = !!body.fail; return send(res, 200, { failPuts }); }
-    if (req.method === 'GET' && p === '/__listings') return send(res, 200, [...listings.values()]);
-    if (req.method === 'POST' && p === '/__reset-listings') { listings.clear(); return send(res, 200, { ok: true }); }
+    if (req.method === 'POST' && p === '/__fail-puts') { failPuts = body.fail ? (body.store || true) : false; return send(res, 200, { failPuts }); }
+    if (req.method === 'GET' && p === '/__listings') return send(res, 200, [...listingsOf(url.searchParams.get('store')).values()]);
+    if (req.method === 'POST' && p === '/__reset-listings') { listingsOf(body?.store).clear(); return send(res, 200, { ok: true }); }
     if (req.headers.authorization !== 'Bearer tok-1') return send(res, 401, { message: 'Unauthorized' });
 
-    if (req.method === 'GET' && p === '/api/v1/partner/stores') return send(res, 200, { data: [{ id: STORE, name: 'Mock Shop', city: 'Nicosia', isActive: true }] });
+    if (req.method === 'GET' && p === '/api/v1/partner/stores') return send(res, 200, { data: STORES });
+
+    // Every other partner route is per store; a store the key cannot access is 404, as live.
+    const sm = p.match(/^\/api\/v1\/partner\/stores\/([^/]+)(\/.*)$/);
+    if (sm && !STORE_IDS.includes(decodeURIComponent(sm[1]))) return send(res, 404, { message: 'Store not found' });
+    const STORE = sm ? decodeURIComponent(sm[1]) : null;
+    const listings = STORE ? listingsOf(STORE) : null;
 
     if (req.method === 'PUT' && p === `/api/v1/partner/stores/${STORE}/products`) {
-      if (failPuts) return send(res, 503, { message: 'Service unavailable' });
+      if (failPuts === true || failPuts === STORE) return send(res, 503, { message: 'Service unavailable' });
       const list = body?.products || [];
       if (list.length > 200) problems.push(`PUT /products with ${list.length} products (live max 200)`);
       if (Buffer.byteLength(raw) > 500 * 1024) problems.push(`PUT /products body ${Buffer.byteLength(raw)} bytes (max 500 KB)`);
       list.forEach(validateProduct);
       fs.writeFileSync(LOG, JSON.stringify({ requests, problems }, null, 2));
-      const results = list.map((x) => { const l = upsertListing(x); return { ref: x.ref, productId: l.productId, listingId: l.listingId, status: 'created', matchedBy: null }; });
+      const results = list.map((x) => { const l = upsertListing(listings, x); return { ref: x.ref, productId: l.productId, listingId: l.listingId, status: 'created', matchedBy: null }; });
       return send(res, 200, { created: results.length, updated: 0, rejected: 0, results });
     }
 
@@ -128,7 +144,7 @@ const server = http.createServer((req, res) => {
         else if (!money(x.price)) problems.push(`${at}.price not 2-decimal string: ${x.price}`);
         const given = [x.listingId, x.ref, x.barcode].filter(Boolean);
         if (given.length !== 1) return { ref: x.ref ?? null, listingId: x.listingId ?? null, status: 'error', code: given.length ? 'ambiguous_ref' : 'ref_not_found', message: 'Provide exactly one of listingId, ref or barcode' };
-        const l = x.listingId ? listings.get(x.listingId) : byRef(x.ref);
+        const l = x.listingId ? listings.get(x.listingId) : byRef(listings, x.ref);
         if (!l) return { ref: x.ref ?? null, listingId: x.listingId ?? null, status: 'error', code: 'ref_not_found', message: 'No listing matches this reference in this store' };
         if (x.price === undefined) return { ref: l.ref, listingId: l.listingId, status: 'error', code: 'price_required', message: 'price is required' };
         for (const k of ['price', 'salePrice', 'stockCount', 'isActive']) if (x[k] !== undefined) l[k] = x[k];
@@ -140,12 +156,14 @@ const server = http.createServer((req, res) => {
       return send(res, rejected === results.length && results.length ? 422 : rejected ? 207 : 200, { accepted: results.length - rejected, rejected, results });
     }
 
-    if (req.method === 'GET' && p === `/api/v1/partner/stores/${STORE}/orders`) return send(res, 200, { data: [...orders.values()], nextCursor: null });
+    const storeOf = (o) => o.storeId || 'store-1';
+    if (req.method === 'GET' && p === `/api/v1/partner/stores/${STORE}/orders`) return send(res, 200, { data: [...orders.values()].filter((o) => storeOf(o) === STORE), nextCursor: null });
 
-    const m = p.match(new RegExp(`^/api/v1/partner/stores/${STORE}/orders/([^/]+)(?:/(accept|ready|reject))?$`));
+    const m = STORE && sm[2].match(/^\/orders\/([^/]+)(?:\/(accept|ready|reject))?$/);
     if (m) {
-      const o = orders.get(m[1]);
-      if (!o) return send(res, 404, { message: 'not found' });
+      const o = orders.get(decodeURIComponent(m[1]));
+      // An order is only reachable through its own store.
+      if (!o || storeOf(o) !== STORE) return send(res, 404, { message: 'not found' });
       if (req.method === 'GET' && !m[2]) return send(res, 200, o);
       const next = { accept: 'ACCEPTED', ready: 'READY_FOR_PICKUP', reject: 'REJECTED' }[m[2]];
       const allowed = { accept: ['DRAFT'], ready: ['ACCEPTED', 'PREPARING'], reject: ['DRAFT', 'ACCEPTED'] }[m[2]];
