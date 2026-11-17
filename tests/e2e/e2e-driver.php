@@ -38,6 +38,7 @@ function save_settings( array $fields ) {
 			'prep_minutes'    => (string) $s['prep_minutes'],
 			'price_markup'    => (string) $s['price_markup'],
 			'catalogue_mode'  => $s['catalogue_mode'],
+			'brand_attribute' => $s['brand_attribute'],
 			'_wpnonce'        => wp_create_nonce( Fetch_WC_Admin::ACTION ),
 		),
 		$fields
@@ -636,6 +637,82 @@ switch ( $step ) {
 		$html           = render_page();
 		$out['help']    = false !== strpos( $html, 'sync products in the default language only' );
 		$out['readout'] = false !== strpos( $html, 'Synced language:' );
+		break;
+
+	case 'content_setup':
+		// Global attributes exist before the product, as in a real shop: WooCommerce
+		// registers attribute taxonomies (and their labels) on init, so the next
+		// request sees them.
+		foreach ( array( 'brands' => array( 'Brands', 'HAIER' ), 'dimensions' => array( 'Width', '65 cm' ) ) as $slug => $def ) {
+			$id = wc_attribute_taxonomy_id_by_name( $slug );
+			if ( ! $id ) {
+				$id = wc_create_attribute( array( 'name' => $def[0], 'slug' => $slug ) );
+			}
+			$taxonomy = wc_attribute_taxonomy_name( $slug );
+			register_taxonomy( $taxonomy, array( 'product' ) );
+			if ( ! term_exists( $def[1], $taxonomy ) ) {
+				wp_insert_term( $def[1], $taxonomy );
+			}
+			$out['attributes'][ $taxonomy ] = $id;
+		}
+		break;
+
+	case 'content':
+		// A hob shaped like a real shop's: brand in the global "Brands" (pa_brands),
+		// specs from global and local attributes, HTML descriptions, SEO meta.
+		$global = static function ( $slug, $term ) {
+			$taxonomy = wc_attribute_taxonomy_name( $slug );
+			$t        = term_exists( $term, $taxonomy );
+			$attr     = new WC_Product_Attribute();
+			$attr->set_id( wc_attribute_taxonomy_id_by_name( $slug ) );
+			$attr->set_name( $taxonomy );
+			$attr->set_options( array( (int) $t['term_id'] ) );
+			$attr->set_visible( true );
+			$attr->set_variation( false );
+			return $attr;
+		};
+		$local = static function ( $name, $value, $visible = true ) {
+			$attr = new WC_Product_Attribute();
+			$attr->set_name( $name );
+			$attr->set_options( array( $value ) );
+			$attr->set_visible( $visible );
+			$attr->set_variation( false );
+			return $attr;
+		};
+		$hob = new WC_Product_Simple();
+		$hob->set_name( 'Induction Hob 65cm' );
+		$hob->set_sku( 'HOB-65' );
+		$hob->set_regular_price( '500' );
+		$hob->set_status( 'publish' );
+		$hob->set_description( "<p>A 65 cm induction hob.</p>\n<p>Touch controls &amp; timer;<br>cut-out 56 x 48 cm.</p>" );
+		$hob->set_short_description( '<p>Four zones, Varycook.</p>' );
+		$hob->set_attributes(
+			array(
+				$global( 'brands', 'HAIER' ),
+				$local( 'Type', 'Induction' ),
+				$local( 'Number of Cooking Zones', '4' ),
+				$local( 'Internal code', 'X-99', false ),
+				$global( 'dimensions', '65 cm' ),
+			)
+		);
+		$hob->update_meta_data( '_yoast_wpseo_title', 'Haier induction hob | Mock Shop' );
+		$hob->update_meta_data( 'rank_math_description', 'A 65 cm Haier induction hob with four zones.' );
+		$hob_id = $hob->save();
+		Fetch_WC_Product_Sync::flush();
+		$out['hob_status'] = get_post_meta( $hob_id, '_fetch_sync_status', true );
+
+		$html                  = render_page();
+		$out['brand_select']   = preg_match( '#<select id="fetch_wc_brand_attribute" name="brand_attribute">(.*?)</select>#s', $html, $m ) && preg_match_all( '#<option value="([^"]*)"#', $m[1], $o ) ? $o[1] : null;
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['brand_notice']   = save_settings( array( 'brand_attribute' => 'pa_dimensions' ) );
+		$out['brand_saved']    = Fetch_WC_Settings::get( 'brand_attribute' );
+		$out['bulk_scheduled'] = as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		Fetch_WC_Product_Sync::queue( $hob_id );
+		Fetch_WC_Product_Sync::flush();
+		save_settings( array( 'brand_attribute' => 'pa_nope' ) );
+		$out['unknown_saved_as'] = Fetch_WC_Settings::get( 'brand_attribute' );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
 		break;
 
 	case 'render_box':

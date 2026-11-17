@@ -6,7 +6,7 @@ Tested up to: 6.8
 Requires PHP: 7.4
 WC requires at least: 8.0
 WC tested up to: 9.9
-Stable tag: 1.2.1
+Stable tag: 1.3.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -62,6 +62,15 @@ Nothing is ever deleted, so it is reversible: a product you bring back is switch
 
 Press **Preview** first to see how many Fetch products would be switched off, with up to 20 names. Safety checks: nothing is switched off if the sync could not reach Fetch for every product or if any page of your Fetch store could not be read, and a run that would switch off more than half of your active Fetch products waits until you press **Apply anyway**. Every run is logged under Recent activity.
 
+= Which brand, specifications and SEO text does Fetch get? =
+
+* **Brand:** a brand taxonomy (WooCommerce Brands, Perfect Brands, YITH Brands), else any product attribute named Brand, Brands or Μάρκα, global or custom. If your shop keeps the brand in another attribute, choose it under **WooCommerce → Fetch → Brand attribute**.
+* **Specifications:** every attribute shown on the product page ("Visible on the product page" ticked, not used for variations), global or custom, with its label and values, in your order.
+* **Descriptions:** the description and the short description, as plain text with their paragraphs kept.
+* **SEO:** the SEO title and meta description you set in **Yoast SEO** or **Rank Math**, with their variables filled in. Nothing is sent when a product has none.
+
+Fetch decides how these appear on your Fetch store, so nothing changes for products Fetch already curates.
+
 = What about stock? =
 
 If WooCommerce manages stock for a product, Fetch gets the exact quantity. If it does not, the product sells on Fetch without a stock limit, and "Out of stock" switches it off on Fetch.
@@ -79,6 +88,12 @@ Both run. The webhook delivers new orders in seconds and is verified with a sign
 WooCommerce → Fetch shows recent activity. The full log is under WooCommerce → Status → Logs, source "fetch". Each product also stores its last sync result.
 
 == Changelog ==
+
+= 1.3.0 =
+* New: product **specifications**. Every attribute shown on the product page, global or custom, is sent to Fetch with its label and values, in your order. Variations sent as separate Fetch products carry their parent's specifications.
+* New: the product's **short description**, and its **SEO title and meta description** from Yoast SEO or Rank Math (variables filled in), are sent to Fetch.
+* New: **Brand attribute** setting. The brand is now also found in any attribute named Brand, Brands or Μάρκα (for example a global "Brands" attribute), global or custom; choose another attribute if your shop keeps the brand elsewhere. Changing it resends all products to Fetch.
+* Fix: descriptions keep their paragraphs and line breaks (and decode `&amp;` and similar) instead of being flattened into one line.
 
 = 1.2.1 =
 * Fix: multilingual shops (WPML, WooCommerce Multilingual, Polylang) sync products in the default language only. Translations were sent as extra Fetch products ("CCAF 011-el", "CCAF 011-ru"), and a translation sharing the original's SKU could overwrite it. Translations are now skipped by the full sync, product saves and stock changes; deleting or trashing a translation no longer switches off the original; **Mirror this shop 1:1** switches off listings that came from translations; and Fetch orders reduce stock on the default-language product. The settings page shows the synced language.

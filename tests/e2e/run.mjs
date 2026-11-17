@@ -356,6 +356,23 @@ try {
   ok('without a multilingual plugin: help line stays, no language readout', la.help === true && la.readout === false, la);
   ok('multilingual requests pass the live rules', mockLog().problems.length === 0, mockLog().problems);
 
+  // --- 1.3.0: brand, specs, descriptions and SEO -----------------------------------------
+  const cs = await step('content_setup');
+  ok('global attributes Brands (pa_brands) and Width (pa_dimensions) created', cs.attributes?.pa_brands > 0 && cs.attributes?.pa_dimensions > 0, cs);
+  p0 = productPuts().length;
+  const ct = await step('content');
+  const hobRows = productPuts().slice(p0).flatMap((r) => r.body.products).filter((x) => x.ref === 'HOB-65');
+  const hob = hobRows[0] || {};
+  ok('brand from the global "Brands" attribute (pa_brands)', hob.brand === 'HAIER' && ct.hob_status === 'synced', { brand: hob.brand, status: ct.hob_status });
+  ok('specs: visible attributes with their labels, in the shop\'s order, hidden ones left out', JSON.stringify(hob.specs) === JSON.stringify([{ name: 'Brands', value: 'HAIER' }, { name: 'Type', value: 'Induction' }, { name: 'Number of Cooking Zones', value: '4' }, { name: 'Width', value: '65 cm' }]), hob.specs);
+  ok('description keeps paragraphs; short description sent', hob.description === 'A 65 cm induction hob.\n\nTouch controls & timer;\ncut-out 56 x 48 cm.' && hob.shortDescription === 'Four zones, Varycook.', { d: hob.description, s: hob.shortDescription });
+  ok('seo: Yoast title and Rank Math description (plugins absent: raw values)', JSON.stringify(hob.seo) === JSON.stringify({ title: 'Haier induction hob | Mock Shop', description: 'A 65 cm Haier induction hob with four zones.' }), hob.seo);
+  ok('settings: "Brand attribute" select lists Automatic and the global attributes', JSON.stringify(ct.brand_select) === JSON.stringify(['', 'pa_brands', 'pa_dimensions']), ct.brand_select);
+  ok('changing the brand attribute saves it and queues a full resync', ct.brand_saved === 'pa_dimensions' && ct.bulk_scheduled === true && /brand attribute changed/.test(ct.brand_notice || ''), ct);
+  ok('the chosen brand attribute is used', hobRows.at(-1)?.brand === '65 cm' && hobRows.length === 2, hobRows.map((x) => x.brand));
+  ok('an attribute the shop does not have saves as Automatic', ct.unknown_saved_as === '', ct.unknown_saved_as);
+  ok('content payloads pass the live rules', mockLog().problems.length === 0, mockLog().problems);
+
   const srv = await step('server');
   ok('server select offers Production, Staging, Custom URL', JSON.stringify(srv.options) === '["production","staging","custom"]' && srv.help === true, srv);
   ok('existing "custom" server kept, its URL field shown', srv.custom_url_kept === 'http://127.0.0.1:9099' && srv.custom_shown === true, srv);
