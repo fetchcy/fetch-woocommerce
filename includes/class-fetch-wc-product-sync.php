@@ -295,7 +295,7 @@ class Fetch_WC_Product_Sync {
 			if ( ( 'trash' === $product->get_status() || ! $wanted ) && ! Fetch_WC_Product_Mapper::was_synced( $product, $store_id ) ) {
 				continue; // Never synced to this store, nothing to switch off.
 			}
-			foreach ( Fetch_WC_Product_Mapper::to_fetch_items( $product, ! $wanted, $markup ) as $pair ) {
+			foreach ( Fetch_WC_Product_Mapper::to_fetch_items( $product, ! $wanted, $markup, $store_id ) as $pair ) {
 				list( $item, $owner )     = $pair;
 				$items[]                  = $item;
 				$products[ $item['ref'] ] = $owner;

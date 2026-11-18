@@ -6,7 +6,7 @@ Tested up to: 6.8
 Requires PHP: 7.4
 WC requires at least: 8.0
 WC tested up to: 9.9
-Stable tag: 1.4.0
+Stable tag: 1.4.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -99,6 +99,10 @@ Both run. The webhook delivers new orders in seconds and is verified with a sign
 WooCommerce → Fetch shows recent activity. The full log is under WooCommerce → Status → Logs, source "fetch". Each product also stores its last sync result.
 
 == Changelog ==
+
+= 1.4.1 =
+* New: **Exclude backorder items** setting (on by default). A product or variation WooCommerce would sell on backorder (status "On backorder", or managed stock at 0 with backorders allowed) is sent to Fetch with stock 0, so it shows as out of stock, and is not added to Fetch while it is on backorder. One already on Fetch stays listed at stock 0 and sells again when stock returns. Applies to every connected store.
+* Upgrading from 1.4.0 turns the setting on; nothing else changes. Untick it to send backorder items as before.
 
 = 1.4.0 =
 * New: **several Fetch stores from one site.** After "Connect & load stores", tick every Fetch store this shop sells in. Products, prices and stock go to each of them, and their orders come here, tagged with the store.

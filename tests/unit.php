@@ -188,7 +188,7 @@ function wp_remote_retrieve_body( $response ) {
 class WC_Product {
 	public $data;
 	public function __construct( array $data ) {
-		$this->data = $data + array( 'id' => 1, 'type' => 'simple', 'status' => 'publish', 'sku' => '', 'meta' => array(), 'sale' => '', 'visibility' => 'visible', 'children' => array(), 'parent' => 0, 'stock' => 1, 'description' => 'Braided cable', 'short' => '', 'attributes' => array() );
+		$this->data = $data + array( 'id' => 1, 'type' => 'simple', 'status' => 'publish', 'sku' => '', 'meta' => array(), 'sale' => '', 'visibility' => 'visible', 'children' => array(), 'parent' => 0, 'stock' => 1, 'manage' => true, 'stock_status' => 'instock', 'backorders' => 'no', 'description' => 'Braided cable', 'short' => '', 'attributes' => array() );
 	}
 	public function is_type( $type ) { return $this->data['type'] === $type; }
 	public function get_children() { return $this->data['children']; }
@@ -215,9 +215,10 @@ class WC_Product {
 	public function get_regular_price( $context = 'view' ) { return $this->data['price']; }
 	public function get_sale_price( $context = 'view' ) { return $this->data['sale']; }
 	public function is_on_sale( $context = 'view' ) { return '' !== $this->data['sale']; }
-	public function managing_stock() { return true; }
+	public function managing_stock() { return $this->data['manage']; }
+	public function get_backorders() { return $this->data['backorders']; }
 	public function get_stock_quantity() { return $this->data['stock']; }
-	public function get_stock_status() { return 'instock'; }
+	public function get_stock_status() { return $this->data['stock_status']; }
 	public function get_image_id() { return 0; }
 	public function get_gallery_image_ids() { return array(); }
 }
@@ -1101,6 +1102,79 @@ $GLOBALS['fake_lang_of']     = $lang_of;
 $GLOBALS['fake_original_of'] = array_map( function ( $c ) { return $c[5]; }, $catalogue );
 check( 'Polylang: detected (before its WPML compatibility filters)', Fetch_WC_Language::plugin(), 'polylang' );
 $multilingual( 'Polylang' );
+
+// --- Exclude backorder items (1.4.1) ----------------------------------------------------
+$GLOBALS['fake_options'] = array( Fetch_WC_Settings::OPTION => array( 'client_id' => 'c', 'client_secret' => 's', 'store_id' => 'store-1', 'store_name' => 'Main' ) );
+check( 'backorders: a 1.4.0 config (no such key) reads as on, other settings untouched', array( Fetch_WC_Settings::exclude_backorders(), Fetch_WC_Settings::store_markup( 'store-1' ), Fetch_WC_Settings::get( 'sync_products' ) ), array( true, 0.0, 'yes' ) );
+$GLOBALS['fake_options'][ Fetch_WC_Settings::OPTION ]['exclude_backorders'] = 'no';
+check( 'backorders: saved "no" turns it off', Fetch_WC_Settings::exclude_backorders(), false );
+$GLOBALS['fake_options'][ Fetch_WC_Settings::OPTION ]['exclude_backorders'] = 'yes';
+check( 'backorders: saved "yes" is on', Fetch_WC_Settings::exclude_backorders(), true );
+
+$bo = static function ( array $d ) {
+	return Fetch_WC_Product_Mapper::on_backorder( new WC_Product( $d + array( 'name' => 'P', 'price' => '10', 'type' => 'simple' ) ) );
+};
+foreach ( array(
+	'in stock, managed 5, backorders no'             => array( array( 'stock' => 5 ), false ),
+	'in stock, managed 5, backorders yes'            => array( array( 'stock' => 5, 'backorders' => 'yes' ), false ),
+	'managed 0, backorders no'                       => array( array( 'stock' => 0, 'stock_status' => 'outofstock' ), false ),
+	'managed 0, backorders notify'                   => array( array( 'stock' => 0, 'backorders' => 'notify' ), true ),
+	'managed 0, backorders yes'                      => array( array( 'stock' => 0, 'backorders' => 'yes' ), true ),
+	'managed -3, backorders yes'                     => array( array( 'stock' => -3, 'backorders' => 'yes', 'stock_status' => 'onbackorder' ), true ),
+	'managed -3, backorders no'                      => array( array( 'stock' => -3, 'stock_status' => 'outofstock' ), false ),
+	'managed, null quantity, backorders notify'      => array( array( 'stock' => null, 'backorders' => 'notify' ), true ),
+	'unmanaged, instock'                             => array( array( 'manage' => false, 'stock_status' => 'instock' ), false ),
+	'unmanaged, instock, backorders yes'             => array( array( 'manage' => false, 'backorders' => 'yes' ), false ),
+	'unmanaged, outofstock'                          => array( array( 'manage' => false, 'stock_status' => 'outofstock' ), false ),
+	'unmanaged, onbackorder'                         => array( array( 'manage' => false, 'stock_status' => 'onbackorder' ), true ),
+	'managed 5 but status onbackorder'               => array( array( 'stock' => 5, 'stock_status' => 'onbackorder' ), true ),
+) as $label => $case ) {
+	check( "on_backorder: $label", $bo( $case[0] ), $case[1] );
+}
+check( 'on_backorder: a variation (managed 0, backorders yes)', Fetch_WC_Product_Mapper::on_backorder( new WC_Product_Variation( array( 'id' => 9, 'name' => 'V', 'stock' => 0, 'backorders' => 'yes' ) ) ), true );
+
+$stock_of = static function ( array $d, $new_for = null ) {
+	$rows = Fetch_WC_Product_Mapper::to_fetch_items( new WC_Product( $d + array( 'id' => 50, 'name' => 'P', 'price' => '10', 'sku' => 'BO-1' ) ), false, 0.0, $new_for );
+	return $rows ? ( isset( $rows[0][0]['stockCount'] ) ? $rows[0][0]['stockCount'] : 'omitted' ) : 'skipped';
+};
+check( 'backorder item, managed 0 + backorders yes: stockCount 0', $stock_of( array( 'stock' => 0, 'backorders' => 'yes' ) ), 0 );
+check( 'backorder item, managed -4: stockCount 0', $stock_of( array( 'stock' => -4, 'backorders' => 'notify', 'stock_status' => 'onbackorder' ) ), 0 );
+check( 'backorder item, unmanaged onbackorder: stockCount 0 (not omitted)', $stock_of( array( 'manage' => false, 'stock_status' => 'onbackorder' ) ), 0 );
+check( 'managed 5 but status onbackorder: stockCount 0', $stock_of( array( 'stock' => 5, 'stock_status' => 'onbackorder' ) ), 0 );
+check( 'normal items unchanged: managed 5 / unmanaged instock (omitted) / outofstock (0)', array( $stock_of( array( 'stock' => 5 ) ), $stock_of( array( 'manage' => false ) ), $stock_of( array( 'manage' => false, 'stock_status' => 'outofstock' ) ) ), array( 5, 'omitted', 0 ) );
+check( 'stock returns: in stock, positive quantity, normal sync resumes', $stock_of( array( 'stock' => 7, 'backorders' => 'yes' ), 'store-1' ), 7 );
+check( 'new backorder item is skipped in the create path', $stock_of( array( 'stock' => 0, 'backorders' => 'yes' ), 'store-1' ), 'skipped' );
+check( 'new onbackorder status (unmanaged) is skipped too', $stock_of( array( 'manage' => false, 'stock_status' => 'onbackorder' ), 'store-1' ), 'skipped' );
+check( 'a linked listing keeps updating, at 0', $stock_of( array( 'stock' => 0, 'backorders' => 'yes', 'meta' => array( '_fetch_product_id' => 'prod-1' ) ), 'store-1' ), 0 );
+check( 'a normal new product is still created', $stock_of( array( 'stock' => 3 ), 'store-1' ), 3 );
+check( 'linked on another store only: still skipped for this one (suffix per store)', array(
+	$stock_of( array( 'stock' => 0, 'backorders' => 'yes', 'meta' => array( '_fetch_product_id_b-2' => 'prod-b' ) ), 'store-1' ),
+	$stock_of( array( 'stock' => 0, 'backorders' => 'yes', 'meta' => array( '_fetch_product_id_b-2' => 'prod-b' ) ), 'b-2' ),
+), array( 'skipped', 0 ) );
+
+// Variable product: one row per variation; a new backorder variation is skipped, a linked one goes at 0.
+$GLOBALS['fake_products'][60] = new WC_Product( array( 'id' => 60, 'name' => 'Tee', 'type' => 'variable', 'children' => array( 61, 62, 63 ), 'sku' => 'TEE', 'price' => '' ) );
+$GLOBALS['fake_products'][61] = new WC_Product_Variation( array( 'id' => 61, 'name' => 'Tee S', 'sku' => 'TEE-S', 'price' => '10', 'stock' => 4, 'parent' => 60 ) );
+$GLOBALS['fake_products'][62] = new WC_Product_Variation( array( 'id' => 62, 'name' => 'Tee M', 'sku' => 'TEE-M', 'price' => '10', 'stock' => 0, 'backorders' => 'yes', 'parent' => 60 ) );
+$GLOBALS['fake_products'][63] = new WC_Product_Variation( array( 'id' => 63, 'name' => 'Tee L', 'sku' => 'TEE-L', 'price' => '10', 'stock' => 0, 'backorders' => 'yes', 'parent' => 60, 'meta' => array( '_fetch_product_id' => 'prod-L' ) ) );
+$variation_rows = static function ( $new_for ) {
+	$out = array();
+	foreach ( Fetch_WC_Product_Mapper::to_fetch_items( $GLOBALS['fake_products'][60], false, 0.0, $new_for ) as $pair ) {
+		$out[ $pair[0]['ref'] ] = $pair[0]['stockCount'];
+	}
+	return $out;
+};
+check( 'variable, create path: the new backorder variation is skipped, the linked one goes at 0', $variation_rows( 'store-1' ), array( 'TEE-S' => 4, 'TEE-L' => 0 ) );
+check( 'variable, update-only call (no create filter): every variation, backorders at 0', $variation_rows( null ), array( 'TEE-S' => 4, 'TEE-M' => 0, 'TEE-L' => 0 ) );
+$GLOBALS['fake_products'][62]->data['stock'] = -2;
+check( 'variable: a negative variation quantity is sent as 0', $variation_rows( null )['TEE-M'], 0 );
+check( 'deactivation rows for a backorder variation are still built', count( Fetch_WC_Product_Mapper::deactivations( $GLOBALS['fake_products'][60] ) ), 3 );
+
+// Setting off: today's behaviour.
+$GLOBALS['fake_options'][ Fetch_WC_Settings::OPTION ]['exclude_backorders'] = 'no';
+check( 'setting off: backorder item keeps its quantity (managed -4 → 0, status onbackorder unmanaged → omitted)', array( $stock_of( array( 'stock' => -4, 'backorders' => 'yes' ), 'store-1' ), $stock_of( array( 'manage' => false, 'stock_status' => 'onbackorder' ), 'store-1' ), $stock_of( array( 'stock' => 5, 'stock_status' => 'onbackorder' ), 'store-1' ) ), array( 0, 'omitted', 5 ) );
+check( 'setting off: new backorder variations are created', array_keys( $variation_rows( 'store-1' ) ), array( 'TEE-S', 'TEE-M', 'TEE-L' ) );
+$GLOBALS['fake_options'] = array();
 
 echo "$passes passed, $failures failed\n";
 exit( $failures ? 1 : 0 );

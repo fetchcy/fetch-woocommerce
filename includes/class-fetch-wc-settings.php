@@ -41,6 +41,8 @@ class Fetch_WC_Settings {
 			'price_markup'       => 0,
 			'catalogue_mode'     => 'add_update',
 			'brand_attribute'    => '',
+			// Absent from a 1.4.0 config, so an upgrade reads it as on.
+			'exclude_backorders' => 'yes',
 			'import_orders'      => 'yes',
 			'auto_accept'        => 'no',
 			'prep_minutes'       => 15,
@@ -268,6 +270,11 @@ class Fetch_WC_Settings {
 
 	public static function brand_attribute() {
 		return self::sanitize_brand_attribute( self::get( 'brand_attribute' ) );
+	}
+
+	/** "Exclude backorder items": on unless a shop turned it off. */
+	public static function exclude_backorders() {
+		return 'no' !== self::get( 'exclude_backorders' );
 	}
 
 	public static function enabled( $key ) {

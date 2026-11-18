@@ -49,16 +49,22 @@ class Fetch_WC_Product_Mapper {
 	 * specs and SEO meta.
 	 *
 	 * $force_inactive builds the same full rows switched off, for a deletion.
+	 * $new_for_store (a store id) leaves out items on backorder that store has
+	 * not got yet, when "Exclude backorder items" is on: they are not created,
+	 * but an item the store already has is still sent, at stock 0.
 	 *
 	 * @return array<int,array{0:array<string,mixed>,1:WC_Product}>
 	 */
-	public static function to_fetch_items( WC_Product $product, $force_inactive = false, $markup = null ) {
+	public static function to_fetch_items( WC_Product $product, $force_inactive = false, $markup = null, $new_for_store = null ) {
 		if ( ! self::supports( $product ) ) {
 			return array();
 		}
 
 		$base = self::shared_fields( $product );
 		if ( ! $product->is_type( 'variable' ) ) {
+			if ( self::skip_new_backorder( $product, $new_for_store ) ) {
+				return array();
+			}
 			$item = array_merge(
 				array(
 					'ref'         => self::ref( $product ),
@@ -85,7 +91,7 @@ class Fetch_WC_Product_Mapper {
 		$out           = array();
 		foreach ( $product->get_children() as $child_id ) {
 			$variation = wc_get_product( $child_id );
-			if ( ! $variation instanceof WC_Product_Variation ) {
+			if ( ! $variation instanceof WC_Product_Variation || self::skip_new_backorder( $variation, $new_for_store ) ) {
 				continue;
 			}
 			$label = implode( ' / ', array_filter( array_values( self::variation_attributes( $variation ) ) ) );
@@ -268,6 +274,26 @@ class Fetch_WC_Product_Mapper {
 		return 'publish' === $variation->get_status() && $variation->variation_is_visible();
 	}
 
+	/**
+	 * What WooCommerce would sell on backorder: status "onbackorder", or managed
+	 * stock at or below 0 with backorders allowed ("notify" or "yes"). A
+	 * variation that defers to its parent answers with the parent's settings.
+	 */
+	public static function on_backorder( WC_Product $product ) {
+		if ( 'onbackorder' === $product->get_stock_status() ) {
+			return true;
+		}
+		return $product->managing_stock() && (int) $product->get_stock_quantity() <= 0 && in_array( $product->get_backorders(), array( 'notify', 'yes' ), true );
+	}
+
+	/** A backorder item that $store_id has not got yet, with the setting on. */
+	private static function skip_new_backorder( WC_Product $product, $store_id ) {
+		return null !== $store_id
+			&& Fetch_WC_Settings::exclude_backorders()
+			&& self::on_backorder( $product )
+			&& ! $product->get_meta( Fetch_WC_Product_Sync::META_PRODUCT_ID . Fetch_WC_Settings::suffix( $store_id ) );
+	}
+
 	/** price / salePrice / stockCount for a simple product or a variation. */
 	private static function price_and_stock( WC_Product $product, $markup = null ) {
 		$out     = array();
@@ -288,10 +314,13 @@ class Fetch_WC_Product_Mapper {
 	}
 
 	/**
-	 * Managed stock → its quantity (never negative). Unmanaged → 0 when out of
+	 * Backorder items (when excluded) → 0. Managed stock → its quantity (never negative). Unmanaged → 0 when out of
 	 * stock, otherwise omitted so Fetch sells it without stock tracking.
 	 */
 	private static function stock( WC_Product $product ) {
+		if ( Fetch_WC_Settings::exclude_backorders() && self::on_backorder( $product ) ) {
+			return 0;
+		}
 		if ( $product->managing_stock() ) {
 			return max( 0, (int) $product->get_stock_quantity() );
 		}

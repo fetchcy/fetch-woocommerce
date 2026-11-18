@@ -73,8 +73,8 @@ try {
     fs.cpSync(path.join(repo, f), path.join(plugin, f), { recursive: true });
   }
   const v14 = await step('version');
-  ok('1.4.0 is running', v14.version === '1.4.0', v14.version);
-  ok('the update changes no setting by itself', JSON.stringify(Object.fromEntries(Object.entries(v14.settings).filter(([k]) => k !== 'stores'))) === JSON.stringify(Object.fromEntries(Object.entries(settingsBefore).filter(([k]) => k !== 'stores'))) && v14.settings.stores === null, { before: settingsBefore, after: v14.settings });
+  ok('1.4.1 is running', v14.version === '1.4.1', v14.version);
+  ok('the update changes no setting by itself (only the new "Exclude backorder items" appears, on)', JSON.stringify(Object.fromEntries(Object.entries(v14.settings).filter(([k]) => k !== 'stores' && k !== 'exclude_backorders'))) === JSON.stringify(Object.fromEntries(Object.entries(settingsBefore).filter(([k]) => k !== 'stores'))) && v14.settings.stores === null && v14.settings.exclude_backorders === 'yes', { before: settingsBefore, after: v14.settings });
 
   const p0 = mockLog().requests.length;
   const up = await step('upgrade_check');
