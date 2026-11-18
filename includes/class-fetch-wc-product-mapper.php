@@ -3,7 +3,7 @@
  * WooCommerce product → Fetch `PUT /stores/{storeId}/products` item.
  *
  * Fetch prices are what the customer pays, VAT included, as decimal strings,
- * plus the merchant's optional price markup.
+ * plus the merchant's optional price markup (the store's own, or the global one).
  * A product's ref is its SKU (or "wc-<id>" without one), frozen in post meta on
  * first sync so a later SKU edit updates the same Fetch product instead of
  * creating a second one.
@@ -39,7 +39,8 @@ class Fetch_WC_Product_Mapper {
 
 	/**
 	 * Fetch items for one WooCommerce product, each paired with the WooCommerce
-	 * product (or variation) its result is recorded on.
+	 * product (or variation) its result is recorded on. $markup is the store's
+ * price markup in percent; null is the global markup.
 	 *
 	 * Live Fetch stores accept SIMPLE products only through PUT /products, so a
 	 * variable product is sent as one simple product per variation: its own ref
@@ -51,7 +52,7 @@ class Fetch_WC_Product_Mapper {
 	 *
 	 * @return array<int,array{0:array<string,mixed>,1:WC_Product}>
 	 */
-	public static function to_fetch_items( WC_Product $product, $force_inactive = false ) {
+	public static function to_fetch_items( WC_Product $product, $force_inactive = false, $markup = null ) {
 		if ( ! self::supports( $product ) ) {
 			return array();
 		}
@@ -66,7 +67,7 @@ class Fetch_WC_Product_Mapper {
 					'isActive'    => ! $force_inactive && self::is_active( $product ),
 				),
 				$base,
-				self::price_and_stock( $product )
+				self::price_and_stock( $product, $markup )
 			);
 			$barcode = self::barcode( $product );
 			if ( '' !== $barcode ) {
@@ -96,7 +97,7 @@ class Fetch_WC_Product_Mapper {
 					'isActive'    => $parent_active && self::variation_is_active( $variation ),
 				),
 				$base,
-				self::price_and_stock( $variation )
+				self::price_and_stock( $variation, $markup )
 			);
 			$barcode = self::barcode( $variation );
 			if ( '' !== $barcode ) {
@@ -116,10 +117,10 @@ class Fetch_WC_Product_Mapper {
 	 * Live Fetch rejects a row without a price, so these are the full rows
 	 * built from the product's current values with isActive=false.
 	 */
-	public static function deactivations( WC_Product $product ) {
+	public static function deactivations( WC_Product $product, $markup = null ) {
 		if ( $product instanceof WC_Product_Variation ) {
 			$parent = wc_get_product( $product->get_parent_id() );
-			foreach ( $parent instanceof WC_Product ? self::to_fetch_items( $parent, true ) : array() as $pair ) {
+			foreach ( $parent instanceof WC_Product ? self::to_fetch_items( $parent, true, $markup ) : array() as $pair ) {
 				if ( $pair[1]->get_id() === $product->get_id() ) {
 					return array( $pair[0] );
 				}
@@ -127,7 +128,7 @@ class Fetch_WC_Product_Mapper {
 			return array( self::deactivation( self::ref( $product ), $product->get_name() ) );
 		}
 		$out = array();
-		foreach ( self::to_fetch_items( $product, true ) as $pair ) {
+		foreach ( self::to_fetch_items( $product, true, $markup ) as $pair ) {
 			$out[] = $pair[0];
 		}
 		return $out;
@@ -156,15 +157,37 @@ class Fetch_WC_Product_Mapper {
 		return $refs;
 	}
 
-	/** True once Fetch has accepted this product, or any of its variations. */
-	public static function was_synced( WC_Product $product ) {
-		if ( $product->get_meta( Fetch_WC_Product_Sync::META_PRODUCT_ID ) ) {
+	/** True once a store (null: the primary one) has accepted this product, or any of its variations. */
+	public static function was_synced( WC_Product $product, $store_id = null ) {
+		$key = Fetch_WC_Product_Sync::META_PRODUCT_ID . Fetch_WC_Settings::suffix( $store_id );
+		if ( $product->get_meta( $key ) ) {
 			return true;
 		}
 		foreach ( $product->is_type( 'variable' ) ? $product->get_children() : array() as $child_id ) {
 			$variation = wc_get_product( $child_id );
-			if ( $variation && $variation->get_meta( Fetch_WC_Product_Sync::META_PRODUCT_ID ) ) {
+			if ( $variation && $variation->get_meta( $key ) ) {
 				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A store's category filter: true when the product, or a parent category of
+	 * one of its categories, is among $term_ids (default-language ids). No
+	 * filter is every product.
+	 *
+	 * @param int[] $term_ids
+	 */
+	public static function in_categories( WC_Product $product, array $term_ids ) {
+		if ( ! $term_ids ) {
+			return true;
+		}
+		foreach ( $product->get_category_ids() as $term_id ) {
+			foreach ( array_merge( array( (int) $term_id ), get_ancestors( (int) $term_id, 'product_cat', 'taxonomy' ) ) as $id ) {
+				if ( in_array( Fetch_WC_Language::default_term_id( $id ), $term_ids, true ) ) {
+					return true;
+				}
 			}
 		}
 		return false;
@@ -246,10 +269,10 @@ class Fetch_WC_Product_Mapper {
 	}
 
 	/** price / salePrice / stockCount for a simple product or a variation. */
-	private static function price_and_stock( WC_Product $product ) {
+	private static function price_and_stock( WC_Product $product, $markup = null ) {
 		$out     = array();
 		$regular = $product->get_regular_price( 'edit' );
-		$markup  = Fetch_WC_Settings::markup();
+		$markup  = null === $markup ? Fetch_WC_Settings::markup() : $markup;
 		if ( '' !== $regular && null !== $regular ) {
 			$out['price'] = self::apply_markup( self::money( wc_get_price_including_tax( $product, array( 'price' => (float) $regular ) ) ), $markup );
 		}

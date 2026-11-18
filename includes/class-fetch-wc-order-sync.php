@@ -15,6 +15,10 @@
  * reduced on import and restored if Fetch cancels or the shop rejects. Those
  * stock changes flow back to Fetch through the normal product sync, which
  * keeps both sides on the same number.
+ *
+ * With several Fetch stores connected, every one is polled, each order is
+ * tagged with its store, and stock is shared: an order from any store reduces
+ * the one WooCommerce stock, which then syncs to every store.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -33,6 +37,7 @@ class Fetch_WC_Order_Sync {
 	const META_ORDER_NUMBER = '_fetch_order_number';
 	const META_STATUS       = '_fetch_status';
 	const META_STORE_ID     = '_fetch_store_id';
+	const META_STORE_NAME   = '_fetch_store_name';
 	const META_MASKED       = '_fetch_customer_masked';
 
 	public static function init() {
@@ -52,14 +57,20 @@ class Fetch_WC_Order_Sync {
 		}
 	}
 
-	/** Pull recent orders and import or update each one. */
+	/** Pull recent orders from every connected store and import or update each one. */
 	public static function poll() {
 		if ( ! Fetch_WC_Settings::enabled( 'import_orders' ) || ! Fetch_WC_Settings::is_connected() ) {
 			return;
 		}
-		$store_id = (string) Fetch_WC_Settings::get( 'store_id' );
-		$api      = new Fetch_WC_Api();
-		$query    = array(
+		$api = new Fetch_WC_Api();
+		foreach ( array_keys( Fetch_WC_Settings::stores() ) as $store_id ) {
+			// One store failing is logged and does not stop the others.
+			self::poll_store( $api, $store_id );
+		}
+	}
+
+	private static function poll_store( Fetch_WC_Api $api, $store_id ) {
+		$query = array(
 			'since' => gmdate( 'c', time() - self::POLL_LOOKBACK ),
 			'limit' => '100',
 		);
@@ -67,12 +78,16 @@ class Fetch_WC_Order_Sync {
 		for ( $page = 0; $page < 20; $page++ ) {
 			$result = $api->list_orders( $store_id, $query );
 			if ( ! Fetch_WC_Api::ok( $result ) ) {
-				Fetch_WC_Logger::error( 'Could not read Fetch orders: ' . Fetch_WC_Api::error_message( $result ) );
+				$message = Fetch_WC_Api::error_message( $result );
+				Fetch_WC_Logger::error( Fetch_WC_Settings::label( $store_id ) . 'Could not read Fetch orders: ' . $message );
+				Fetch_WC_Settings::set_store_status( $store_id, array( 'last_error' => $message, 'last_error_at' => time() ) );
 				return;
 			}
 			$body = is_array( $result['body'] ) ? $result['body'] : array();
 			foreach ( isset( $body['data'] ) && is_array( $body['data'] ) ? $body['data'] : array() as $order ) {
-				self::import( $order );
+				if ( is_array( $order ) ) {
+					self::import( $order, 0, $store_id );
+				}
 			}
 			if ( empty( $body['nextCursor'] ) ) {
 				return;
@@ -86,14 +101,20 @@ class Fetch_WC_Order_Sync {
 	 * up to date. Returns the WooCommerce order, null when skipped, or false
 	 * when another request is handling the same order right now.
 	 *
+	 * The order's own storeId decides its store; without one, $store_id (the
+	 * store polled), else the primary store. An order from a store that is not
+	 * connected is not imported, but one imported earlier still follows Fetch.
+	 *
 	 * @param int $wait Seconds to wait for that other request to finish.
 	 * @return WC_Order|null|false
 	 */
-	public static function import( array $data, $wait = 0 ) {
+	public static function import( array $data, $wait = 0, $store_id = null ) {
 		if ( empty( $data['orderId'] ) || empty( $data['status'] ) ) {
 			return null;
 		}
-		if ( ! empty( $data['storeId'] ) && (string) $data['storeId'] !== (string) Fetch_WC_Settings::get( 'store_id' ) ) {
+		$data['storeId'] = ! empty( $data['storeId'] ) ? (string) $data['storeId'] : Fetch_WC_Settings::resolve_store( $store_id );
+		$connected       = null !== Fetch_WC_Settings::store( $data['storeId'] );
+		if ( ! $connected && ! self::find( (string) $data['orderId'] ) ) {
 			return null; // Another store on the same credential.
 		}
 
@@ -117,13 +138,16 @@ class Fetch_WC_Order_Sync {
 			}
 
 			// A cancelled order we never saw needs no WooCommerce order.
-			if ( in_array( $data['status'], Fetch_WC_Order_Mapper::RESTOCKED, true ) ) {
+			if ( ! $connected || in_array( $data['status'], Fetch_WC_Order_Mapper::RESTOCKED, true ) ) {
 				return null;
 			}
 
 			$order = self::create( $data );
-			if ( $order && 'DRAFT' === $data['status'] && Fetch_WC_Settings::enabled( 'auto_accept' ) ) {
-				Fetch_WC_Order_Actions::run( $order, 'accept', array( 'prepMinutes' => (int) Fetch_WC_Settings::get( 'prep_minutes' ) ) );
+			if ( $order ) {
+				Fetch_WC_Settings::set_store_status( $data['storeId'], array( 'last_order' => time() ) );
+			}
+			if ( $order && 'DRAFT' === $data['status'] && Fetch_WC_Settings::store_auto_accept( $data['storeId'] ) ) {
+				Fetch_WC_Order_Actions::run( $order, 'accept', array( 'prepMinutes' => Fetch_WC_Settings::store_prep_minutes( $data['storeId'] ) ) );
 			}
 			return $order;
 		} finally {
@@ -243,7 +267,8 @@ class Fetch_WC_Order_Sync {
 
 		$order->update_meta_data( self::META_ORDER_ID, (string) $data['orderId'] );
 		$order->update_meta_data( self::META_ORDER_NUMBER, isset( $data['orderNumber'] ) ? (string) $data['orderNumber'] : '' );
-		$order->update_meta_data( self::META_STORE_ID, isset( $data['storeId'] ) ? (string) $data['storeId'] : '' );
+		$order->update_meta_data( self::META_STORE_ID, (string) $data['storeId'] );
+		$order->update_meta_data( self::META_STORE_NAME, Fetch_WC_Settings::store_name( $data['storeId'] ) );
 		$order->update_meta_data( self::META_STATUS, (string) $data['status'] );
 		if ( Fetch_WC_Order_Mapper::is_masked( $data ) ) {
 			$order->update_meta_data( self::META_MASKED, '1' );
@@ -257,12 +282,20 @@ class Fetch_WC_Order_Sync {
 		$order->save();
 
 		$order->add_order_note(
-			sprintf(
-				/* translators: 1: Fetch order number, 2: status label */
-				__( 'Fetch order %1$s imported (%2$s).', 'fetch-for-woocommerce' ),
-				isset( $data['orderNumber'] ) ? $data['orderNumber'] : $data['orderId'],
-				Fetch_WC_Order_Mapper::label( $data['status'] )
-			)
+			count( Fetch_WC_Settings::stores() ) > 1
+				? sprintf(
+					/* translators: 1: Fetch order number, 2: Fetch store name, 3: status label */
+					__( 'Fetch order %1$s for %2$s imported (%3$s).', 'fetch-for-woocommerce' ),
+					isset( $data['orderNumber'] ) ? $data['orderNumber'] : $data['orderId'],
+					Fetch_WC_Settings::store_name( $data['storeId'] ),
+					Fetch_WC_Order_Mapper::label( $data['status'] )
+				)
+				: sprintf(
+					/* translators: 1: Fetch order number, 2: status label */
+					__( 'Fetch order %1$s imported (%2$s).', 'fetch-for-woocommerce' ),
+					isset( $data['orderNumber'] ) ? $data['orderNumber'] : $data['orderId'],
+					Fetch_WC_Order_Mapper::label( $data['status'] )
+				)
 		);
 		if ( $unmatched ) {
 			$order->add_order_note(
@@ -278,7 +311,7 @@ class Fetch_WC_Order_Sync {
 		$order->set_status( Fetch_WC_Order_Mapper::wc_status( $data['status'] ) );
 		$order->save();
 
-		Fetch_WC_Logger::info( sprintf( 'Imported Fetch order %s as WooCommerce order #%d.', isset( $data['orderNumber'] ) ? $data['orderNumber'] : $data['orderId'], $order->get_id() ) );
+		Fetch_WC_Logger::info( Fetch_WC_Settings::label( $data['storeId'] ) . sprintf( 'Imported Fetch order %s as WooCommerce order #%d.', isset( $data['orderNumber'] ) ? $data['orderNumber'] : $data['orderId'], $order->get_id() ) );
 		return $order;
 	}
 

@@ -6,8 +6,10 @@
  * deactivation row, masked customer details, the per-order import lock,
  * the "Mirror this shop 1:1" scan, plan, guard and switch-off batches,
  * default-language-only sync with stubbed WPML filters and Polylang functions,
- * and the product content sent to Fetch: brand detection, specs, plain-text
- * descriptions with paragraphs, and Yoast / Rank Math SEO meta.
+ * the product content sent to Fetch: brand detection, specs, plain-text
+ * descriptions with paragraphs, and Yoast / Rank Math SEO meta, and several
+ * Fetch stores from one site: the 1.3.0 upgrade, per-store settings with
+ * fallbacks, keys and queues, markups, category filters and switch-offs.
  */
 
 define( 'ABSPATH', __DIR__ . '/' );
@@ -154,11 +156,26 @@ function home_url() {
 function wp_remote_request( $url, $args ) {
 	$body                      = json_decode( $args['body'], true );
 	$GLOBALS['fake_requests'][] = array( 'method' => $args['method'], 'url' => $url, 'body' => $body );
+	if ( ! empty( $GLOBALS['fake_fail_store'] ) && false !== strpos( $url, '/stores/' . $GLOBALS['fake_fail_store'] . '/' ) ) {
+		return array( 'code' => 503, 'body' => wp_json_encode( array( 'message' => 'Service unavailable' ) ) );
+	}
 	$results                   = array();
 	foreach ( $body['products'] as $row ) {
 		$results[] = array( 'ref' => $row['ref'], 'status' => 'created', 'productId' => 'prod-' . $row['ref'] );
 	}
 	return array( 'code' => 200, 'body' => wp_json_encode( array( 'created' => count( $results ), 'updated' => 0, 'rejected' => 0, 'results' => $results ) ) );
+}
+/** Parent categories, term id => ancestor ids (nearest first), for the category filter tests. */
+$GLOBALS['fake_ancestors'] = array();
+function get_ancestors( $id, $object_type = '', $resource_type = '' ) {
+	return isset( $GLOBALS['fake_ancestors'][ $id ] ) ? $GLOBALS['fake_ancestors'][ $id ] : array();
+}
+function get_term( $id, $taxonomy = '' ) {
+	return (object) array( 'term_id' => $id, 'name' => 'Category ' . $id );
+}
+function delete_option( $name ) {
+	unset( $GLOBALS['fake_options'][ $name ] );
+	return true;
 }
 function wp_remote_retrieve_response_code( $response ) {
 	return $response['code'];
@@ -194,7 +211,7 @@ class WC_Product {
 		}
 		return $out;
 	}
-	public function get_category_ids() { return array(); }
+	public function get_category_ids() { return isset( $this->data['cats'] ) ? $this->data['cats'] : array(); }
 	public function get_regular_price( $context = 'view' ) { return $this->data['price']; }
 	public function get_sale_price( $context = 'view' ) { return $this->data['sale']; }
 	public function is_on_sale( $context = 'view' ) { return '' !== $this->data['sale']; }
@@ -778,6 +795,130 @@ $api         = new Fake_Listings_Api( array( listing( 'k1', 'KEEP-1' ), listing(
 $api->reject = array( 'x1' );
 check( 'every row rejected (422) → all errors, not a transport failure', array_values( array_intersect_key( Fetch_WC_Mirror::execute( $api, 'store-1', $keep2 ), array_flip( array( 'status', 'switched_off', 'errors' ) ) ) ), array( 'done', 0, 1 ) );
 
+
+// --- Several Fetch stores from one site (1.4.0) -------------------------------------------
+// A 1.3.0 install: one store, the global settings. It must read as one connected store, unchanged.
+$GLOBALS['fake_options'] = array( Fetch_WC_Settings::OPTION => array( 'client_id' => 'c', 'client_secret' => 's', 'store_id' => 'store-1', 'store_name' => 'Main', 'price_markup' => 10, 'catalogue_mode' => 'mirror', 'auto_accept' => 'yes', 'prep_minutes' => 20 ) );
+check( 'upgrade: the 1.3.0 store is the one connected store', array_keys( Fetch_WC_Settings::stores() ), array( 'store-1' ) );
+check( 'upgrade: still connected, same name', array( Fetch_WC_Settings::is_connected(), Fetch_WC_Settings::store_name( 'store-1' ) ), array( true, 'Main' ) );
+check( 'upgrade: the store uses the 1.3.0 settings', array( Fetch_WC_Settings::store_markup( 'store-1' ), Fetch_WC_Settings::store_mirror( 'store-1' ), Fetch_WC_Settings::store_auto_accept( 'store-1' ), Fetch_WC_Settings::store_prep_minutes( 'store-1' ), Fetch_WC_Settings::store_categories( 'store-1' ) ), array( 10.0, true, true, 20, array() ) );
+check( 'upgrade: the 1.3.0 option names and meta keys (no migration)', array( Fetch_WC_Settings::suffix( 'store-1' ), Fetch_WC_Settings::suffix( null ), Fetch_WC_Product_Sync::key( Fetch_WC_Product_Sync::PENDING_OPTION, 'store-1' ), Fetch_WC_Product_Sync::key( Fetch_WC_Product_Sync::META_PRODUCT_ID ) ), array( '', '', 'fetch_wc_pending_products', '_fetch_product_id' ) );
+check( 'upgrade: the 1.3.0 job arguments, so jobs it queued still run', array( Fetch_WC_Settings::job_args( 'store-1', array( 'page' => 2 ) ), Fetch_WC_Settings::job_args( null ) ), array( array( 'page' => 2 ), array() ) );
+check( 'one store: log lines are not labelled', Fetch_WC_Settings::label( 'store-1' ), '' );
+$GLOBALS['fake_options'][ Fetch_WC_Settings::OPTION ]['stores'] = array();
+check( 'every store unticked: not connected, even with the old store_id', array( Fetch_WC_Settings::stores(), Fetch_WC_Settings::is_connected() ), array( array(), false ) );
+$GLOBALS['fake_options'] = array();
+check( 'fresh install: no store, not connected', array( Fetch_WC_Settings::stores(), Fetch_WC_Settings::is_connected(), Fetch_WC_Settings::resolve_store( null ) ), array( array(), false, '' ) );
+
+// The chain: one site, the primary store on the defaults, a second with its own settings.
+$multi_settings = array(
+	'client_id'      => 'c',
+	'client_secret'  => 's',
+	'environment'    => 'custom',
+	'custom_base_url' => 'http://fetch.invalid',
+	'store_id'       => 'store-1',
+	'store_name'     => 'Main',
+	'price_markup'   => 10,
+	'catalogue_mode' => 'mirror',
+	'prep_minutes'   => 20,
+	'stores'         => array(
+		'store-1' => array( 'id' => 'store-1', 'name' => 'Main' ),
+		'B-2'     => array( 'id' => 'B-2', 'name' => 'Branch B', 'price_markup' => 15, 'catalogue_mode' => 'add_update', 'categories' => array( '5', 5, 0 ), 'auto_accept' => 'yes', 'prep_minutes' => 30 ),
+	),
+);
+$GLOBALS['fake_options'] = array( Fetch_WC_Settings::OPTION => $multi_settings );
+check( 'multi: both stores connected, in order', array_keys( Fetch_WC_Settings::stores() ), array( 'store-1', 'B-2' ) );
+check( 'multi: a blank store setting falls back to the global one', array( Fetch_WC_Settings::store_markup( 'store-1' ), Fetch_WC_Settings::store_mirror( 'store-1' ), Fetch_WC_Settings::store_auto_accept( 'store-1' ), Fetch_WC_Settings::store_prep_minutes( 'store-1' ) ), array( 10.0, true, false, 20 ) );
+check( 'multi: a store\'s own settings win', array( Fetch_WC_Settings::store_markup( 'B-2' ), Fetch_WC_Settings::store_mirror( 'B-2' ), Fetch_WC_Settings::store_auto_accept( 'B-2' ), Fetch_WC_Settings::store_prep_minutes( 'B-2' ), Fetch_WC_Settings::store_categories( 'B-2' ) ), array( 15.0, false, true, 30, array( 5 ) ) );
+check( 'multi: a second store gets its own option names, meta keys and job arguments', array( Fetch_WC_Product_Sync::key( Fetch_WC_Product_Sync::PENDING_OPTION, 'B-2' ), Fetch_WC_Product_Sync::key( Fetch_WC_Product_Sync::META_PRODUCT_ID, 'B-2' ), Fetch_WC_Settings::job_args( 'B-2', array( 'page' => 1 ) ) ), array( 'fetch_wc_pending_products_b-2', '_fetch_product_id_b-2', array( 'page' => 1, 'store' => 'B-2' ) ) );
+check( 'multi: an id that is not a safe key is hashed', Fetch_WC_Settings::suffix( 'a/b c' ), '_' . md5( 'a/b c' ) );
+check( 'multi: log lines carry the store name', array( Fetch_WC_Settings::label( 'B-2' ), Fetch_WC_Settings::label( null ) ), array( '[Branch B] ', '[Main] ' ) );
+check( 'multi: a store that is not connected has no config', Fetch_WC_Settings::store( 'store-3' ), null );
+
+// Products: 70 in category 7 (a child of 5), 71 in category 9, 72 a variable product in 7.
+$GLOBALS['fake_ancestors'] = array( 7 => array( 5 ) );
+$GLOBALS['fake_posts']     = array( 70 => array( 'product', 0 ), 71 => array( 'product', 0 ), 72 => array( 'product', 0 ), 73 => array( 'product_variation', 72 ), 74 => array( 'product_variation', 72 ) );
+$GLOBALS['fake_products']  = array(
+	70 => new WC_Product( array( 'id' => 70, 'name' => 'Dog food', 'sku' => 'DOG-1', 'price' => '10', 'cats' => array( 7 ) ) ),
+	71 => new WC_Product( array( 'id' => 71, 'name' => 'Cat toy', 'sku' => 'CAT-1', 'price' => '4', 'cats' => array( 9 ) ) ),
+	72 => new WC_Product( array( 'id' => 72, 'name' => 'Lead', 'sku' => 'LEAD', 'price' => '0', 'type' => 'variable', 'children' => array( 73, 74 ), 'cats' => array( 7 ) ) ),
+	73 => new WC_Product_Variation( array( 'id' => 73, 'name' => 'Lead', 'sku' => 'LEAD-S', 'price' => '6', 'parent' => 72 ) ),
+	74 => new WC_Product_Variation( array( 'id' => 74, 'name' => 'Lead', 'sku' => 'LEAD-L', 'price' => '8', 'parent' => 72 ) ),
+);
+check( 'category filter: a product in a subcategory of a chosen one is in', Fetch_WC_Product_Mapper::in_categories( $GLOBALS['fake_products'][70], array( 5 ) ), true );
+check( 'category filter: a product in another category is out', Fetch_WC_Product_Mapper::in_categories( $GLOBALS['fake_products'][71], array( 5 ) ), false );
+check( 'category filter: none chosen is every product', Fetch_WC_Product_Mapper::in_categories( $GLOBALS['fake_products'][71], array() ), true );
+$rows_by_ref = function ( $store ) {
+	$out = array();
+	foreach ( $GLOBALS['fake_requests'] as $r ) {
+		if ( false !== strpos( $r['url'], '/stores/' . $store . '/products' ) ) {
+			foreach ( $r['body']['products'] as $row ) {
+				$out[ $row['ref'] ] = $row;
+			}
+		}
+	}
+	return $out;
+};
+$GLOBALS['fake_requests'] = array();
+check( 'sync to the primary store reaches Fetch', Fetch_WC_Product_Sync::sync_ids( array( 70, 71, 72 ), 'store-1' ), true );
+check( 'sync to store B reaches Fetch', Fetch_WC_Product_Sync::sync_ids( array( 70, 71, 72 ), 'B-2' ), true );
+$main = $rows_by_ref( 'store-1' );
+$b    = $rows_by_ref( 'B-2' );
+check( 'primary store: every product, at the global markup (10 + 19% VAT + 10%)', array( array_keys( $main ), $main['DOG-1']['price'], $main['LEAD-L']['price'] ), array( array( 'DOG-1', 'CAT-1', 'LEAD-S', 'LEAD-L' ), '13.09', '10.47' ) );
+check( 'store B: only its categories, at its own markup (10 + 19% VAT + 15%)', array( array_keys( $b ), $b['DOG-1']['price'], $b['LEAD-L']['price'] ), array( array( 'DOG-1', 'LEAD-S', 'LEAD-L' ), '13.69', '10.95' ) );
+check( 'refs and stock are the same in every store', array( $b['DOG-1']['ref'] === $main['DOG-1']['ref'], $b['DOG-1']['stockCount'] === $main['DOG-1']['stockCount'] ), array( true, true ) );
+$dog = $GLOBALS['fake_products'][70]->data['meta'];
+check( 'each store\'s Fetch product id and result are kept apart; the ref is shared', array( $dog['_fetch_product_id'], $dog['_fetch_product_id_b-2'], $dog['_fetch_sync_status'], $dog['_fetch_sync_status_b-2'], $dog['_fetch_ref'] ), array( 'prod-DOG-1', 'prod-DOG-1', 'synced', 'synced', 'DOG-1' ) );
+check( 'a store never sent a product has no id for it', isset( $GLOBALS['fake_products'][71]->data['meta']['_fetch_product_id_b-2'] ), false );
+check( 'was_synced is per store', array( Fetch_WC_Product_Mapper::was_synced( $GLOBALS['fake_products'][71], 'store-1' ), Fetch_WC_Product_Mapper::was_synced( $GLOBALS['fake_products'][71], 'B-2' ), Fetch_WC_Product_Mapper::was_synced( $GLOBALS['fake_products'][72], 'B-2' ) ), array( true, false, true ) );
+
+// The dog food moves to category 9: store B switches it off, the primary store keeps it.
+$GLOBALS['fake_products'][70]->data['cats'] = array( 9 );
+$GLOBALS['fake_requests']                   = array();
+Fetch_WC_Product_Sync::sync_ids( array( 70, 71 ), 'B-2' );
+$b = $rows_by_ref( 'B-2' );
+check( 'a product leaving a store\'s categories is switched off there (full row, its price)', array( array_keys( $b ), $b['DOG-1']['isActive'], $b['DOG-1']['price'] ), array( array( 'DOG-1' ), false, '13.69' ) );
+$GLOBALS['fake_products'][70]->data['cats'] = array( 7 );
+
+// Save hooks queue a product once per store that takes it (or has it).
+unset( $GLOBALS['fake_options']['fetch_wc_pending_products'], $GLOBALS['fake_options']['fetch_wc_pending_products_b-2'] );
+foreach ( array( 70, 71, 73 ) as $id ) {
+	Fetch_WC_Product_Sync::queue( $id );
+}
+check( 'queue: the primary store gets every product', array_keys( get_option( 'fetch_wc_pending_products', array() ) ), array( 70, 71, 72 ) );
+check( 'queue: store B only gets products in its categories', array_keys( get_option( 'fetch_wc_pending_products_b-2', array() ) ), array( 70, 72 ) );
+
+// Deleting: each store that has the product gets its switch-off row, at its own price.
+Fetch_WC_Product_Sync::queue_deletion( 70 );
+$off_main = get_option( 'fetch_wc_pending_deactivations', array() );
+$off_b    = get_option( 'fetch_wc_pending_deactivations_b-2', array() );
+check( 'delete: switched off in both stores, each at its own price', array( $off_main['DOG-1']['isActive'], $off_main['DOG-1']['price'], $off_b['DOG-1']['isActive'], $off_b['DOG-1']['price'] ), array( false, '13.09', false, '13.69' ) );
+check( 'delete: no longer queued for an update in either store', array( isset( get_option( 'fetch_wc_pending_products' )[70] ), isset( get_option( 'fetch_wc_pending_products_b-2' )[70] ) ), array( false, false ) );
+Fetch_WC_Product_Sync::queue_deletion( 71 );
+check( 'delete: a store that never had the product is not sent anything', array( isset( get_option( 'fetch_wc_pending_deactivations', array() )['CAT-1'] ), isset( get_option( 'fetch_wc_pending_deactivations_b-2', array() )['CAT-1'] ) ), array( true, false ) );
+
+// Mirror: each store keeps only what it sells.
+$keep_main = array_keys( Fetch_WC_Mirror::shop_refs( 'store-1' ) );
+$keep_b    = array_keys( Fetch_WC_Mirror::shop_refs( 'B-2' ) );
+sort( $keep_main );
+sort( $keep_b );
+check( 'mirror: the primary store keeps every product', $keep_main, array( 'CAT-1', 'DOG-1', 'LEAD-L', 'LEAD-S' ) );
+check( 'mirror: store B keeps only its categories, so a listing for the cat toy would be switched off there', $keep_b, array( 'DOG-1', 'LEAD-L', 'LEAD-S' ) );
+
+// One store's API error does not hold up the other.
+$GLOBALS['fake_fail_store'] = 'store-1';
+$GLOBALS['fake_requests']   = array();
+unset( $GLOBALS['fake_options']['fetch_wc_pending_products'], $GLOBALS['fake_options']['fetch_wc_pending_products_b-2'] );
+check( 'a store that cannot be reached reports failure', Fetch_WC_Product_Sync::sync_ids( array( 70 ), 'store-1' ), false );
+check( '…and requeues only its own product', array( array_keys( get_option( 'fetch_wc_pending_products', array() ) ), get_option( 'fetch_wc_pending_products_b-2', array() ) ), array( array( 70 ), array() ) );
+check( 'the other store syncs as usual', array( Fetch_WC_Product_Sync::sync_ids( array( 70 ), 'B-2' ), array_keys( $rows_by_ref( 'B-2' ) ) ), array( true, array( 'DOG-1' ) ) );
+$status = Fetch_WC_Settings::store_status( 'store-1' );
+check( 'the failure is on the failing store\'s status, not the other\'s', array( false !== strpos( $status['last_error'], 'HTTP 503' ), Fetch_WC_Settings::store_status( 'B-2' ) ), array( true, array() ) );
+check( 'the failing store\'s product shows the error; the other store\'s result is untouched', array( $GLOBALS['fake_products'][70]->data['meta']['_fetch_sync_status'], $GLOBALS['fake_products'][70]->data['meta']['_fetch_sync_status_b-2'] ), array( 'error', 'synced' ) );
+unset( $GLOBALS['fake_fail_store'] );
+$GLOBALS['fake_posts']     = array();
+$GLOBALS['fake_products']  = array();
+$GLOBALS['fake_ancestors'] = array();
 
 // --- Multilingual shops: only the default language goes to Fetch --------------------------
 // A WooCommerce shop with English originals and Greek / Russian translations as their own posts.

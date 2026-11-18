@@ -120,6 +120,24 @@ class Fetch_WC_Language {
 	}
 
 	/**
+	 * The default-language copy of a product category, so a store's category
+	 * filter matches whichever language the merchant picked it in.
+	 */
+	public static function default_term_id( $term_id ) {
+		$term_id = (int) $term_id;
+		$default = self::default_language();
+		if ( ! $term_id || '' === $default ) {
+			return $term_id;
+		}
+		if ( 'polylang' === self::plugin() ) {
+			$original = function_exists( 'pll_get_term' ) ? (int) pll_get_term( $term_id, $default ) : 0;
+		} else {
+			$original = (int) apply_filters( 'wpml_object_id', $term_id, 'product_cat', true, $default );
+		}
+		return $original ? $original : $term_id;
+	}
+
+	/**
 	 * wc_get_products() across every language, so a page of product IDs never
 	 * depends on the language WPML or Polylang filters the current request by;
 	 * callers keep the default-language ones with is_default().

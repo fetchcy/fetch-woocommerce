@@ -5,6 +5,11 @@
  * Fetch signs every delivery: `X-Fetch-Signature: t=<unix seconds>,v1=<hex>`
  * where v1 = HMAC-SHA256(secret, "<t>.<raw body>"). Deliveries older than five
  * minutes are refused so a captured request cannot be replayed.
+ *
+ * Fetch registers one webhook URL and secret per API key, and sends it the
+ * orders of every store the key can access. Each delivery is routed by the
+ * order's storeId; orders of a store not connected to this site are
+ * acknowledged and ignored.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -56,6 +61,16 @@ class Fetch_WC_Webhook {
 			return new WP_REST_Response( array( 'ok' => true, 'duplicate' => true ), 200 );
 		}
 
+		$store_id = isset( $payload['data']['storeId'] ) ? (string) $payload['data']['storeId'] : '';
+		$order_id = isset( $payload['data']['orderId'] ) ? (string) $payload['data']['orderId'] : '';
+		if ( '' !== $store_id && ! Fetch_WC_Settings::store( $store_id ) && ( '' === $order_id || ! Fetch_WC_Order_Sync::find( $order_id ) ) ) {
+			self::log_ignored( $store_id );
+			if ( '' !== $event_id ) {
+				self::remember( $event_id );
+			}
+			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'store not connected' ), 200 );
+		}
+
 		if ( 0 === strpos( (string) $payload['event'], 'order.' ) && Fetch_WC_Settings::enabled( 'import_orders' ) ) {
 			// order.created, order.status_changed and order.cancelled all carry the
 			// full order; import() creates it or brings status and customer up to date.
@@ -95,6 +110,16 @@ class Fetch_WC_Webhook {
 			}
 		}
 		return false;
+	}
+
+	/** Once a day per store, so a busy store this site does not serve cannot flood the activity log. */
+	private static function log_ignored( $store_id ) {
+		$key = 'fetch_wc_ignored_' . md5( $store_id );
+		if ( get_transient( $key ) ) {
+			return;
+		}
+		set_transient( $key, 1, DAY_IN_SECONDS );
+		Fetch_WC_Logger::info( sprintf( 'Ignored Fetch orders from store %s: it is not connected to this site. Connect it under WooCommerce → Fetch to import them.', $store_id ) );
 	}
 
 	private static function seen( $event_id ) {

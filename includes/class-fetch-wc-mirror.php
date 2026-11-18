@@ -12,6 +12,10 @@
  * Nothing is switched off unless the full sync reached Fetch for every product
  * and the listing scan read every page. A run that would switch off more than
  * half of the store's active listings waits for the merchant to confirm.
+ *
+ * Each Fetch store mirrors on its own: its own mode, its own full sync, and
+ * only the products its category filter takes. Mirroring one store never
+ * touches another.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -29,40 +33,43 @@ class Fetch_WC_Mirror {
 	const GUARD_RATIO = 0.5;
 
 	public static function init() {
-		add_action( self::HOOK, array( __CLASS__, 'apply_confirmed' ), 10, 1 );
+		add_action( self::HOOK, array( __CLASS__, 'apply_confirmed' ), 10, 2 );
 	}
 
-	/** End of a full sync ("Sync all products now", or the resync after a markup change). */
-	public static function after_full_sync( $push_failed ) {
-		if ( ! Fetch_WC_Settings::mirror() ) {
+	/** End of a store's full sync ("Sync all products now", or the resync after a markup change). */
+	public static function after_full_sync( $push_failed, $store_id = null ) {
+		if ( ! Fetch_WC_Settings::store_mirror( $store_id ) ) {
 			return;
 		}
 		if ( $push_failed ) {
-			Fetch_WC_Logger::error( 'Mirror skipped: the full sync could not reach Fetch for every product, so nothing was switched off.' );
+			Fetch_WC_Logger::error( Fetch_WC_Settings::label( $store_id ) . 'Mirror skipped: the full sync could not reach Fetch for every product, so nothing was switched off.' );
 			return;
 		}
-		self::run( null );
+		self::run( null, $store_id );
 	}
 
-	/** "Apply anyway": switch off up to the number the merchant confirmed. */
-	public static function apply_confirmed( $up_to ) {
-		self::run( max( 0, (int) $up_to ) );
+	/** "Apply anyway": switch off up to the number the merchant confirmed (null store: the primary one). */
+	public static function apply_confirmed( $up_to, $store_id = null ) {
+		self::run( max( 0, (int) $up_to ), $store_id );
 	}
 
 	/** Dry run for the settings page. */
-	public static function preview() {
-		return self::execute( new Fetch_WC_Api(), (string) Fetch_WC_Settings::get( 'store_id' ), self::shop_refs(), true );
+	public static function preview( $store_id = null ) {
+		$store_id = Fetch_WC_Settings::resolve_store( $store_id );
+		return self::execute( new Fetch_WC_Api(), $store_id, self::shop_refs( $store_id ), true );
 	}
 
-	private static function run( $confirmed_up_to ) {
-		if ( ! Fetch_WC_Settings::mirror() || ! Fetch_WC_Settings::is_connected() ) {
+	private static function run( $confirmed_up_to, $store_id ) {
+		$store_id = Fetch_WC_Settings::resolve_store( $store_id );
+		if ( ! Fetch_WC_Settings::store_mirror( $store_id ) || ! Fetch_WC_Settings::is_connected() || ! Fetch_WC_Settings::store( $store_id ) ) {
 			return;
 		}
-		$result = self::execute( new Fetch_WC_Api(), (string) Fetch_WC_Settings::get( 'store_id' ), self::shop_refs(), false, $confirmed_up_to );
+		$result = self::execute( new Fetch_WC_Api(), $store_id, self::shop_refs( $store_id ), false, $confirmed_up_to );
+		$option = self::PENDING_OPTION . Fetch_WC_Settings::suffix( $store_id );
 
 		if ( 'needs_confirmation' === $result['status'] ) {
 			update_option(
-				self::PENDING_OPTION,
+				$option,
 				array(
 					'time'    => time(),
 					'off'     => $result['off'],
@@ -73,38 +80,40 @@ class Fetch_WC_Mirror {
 				false
 			);
 		} elseif ( 'scan_failed' !== $result['status'] ) {
-			delete_option( self::PENDING_OPTION );
+			delete_option( $option );
 		}
-		self::log( $result );
+		self::log( $result, Fetch_WC_Settings::label( $store_id ) );
 	}
 
-	private static function log( array $r ) {
+	private static function log( array $r, $label ) {
 		$counts = sprintf( 'scanned %d Fetch products, kept %d, switched off %d, %d errors', $r['scanned'], $r['kept'], $r['switched_off'], $r['errors'] );
 		switch ( $r['status'] ) {
 			case 'scan_failed':
-				Fetch_WC_Logger::error( 'Mirror aborted, nothing was switched off: could not read every listing from Fetch (' . $r['error'] . ').' );
+				Fetch_WC_Logger::error( $label . 'Mirror aborted, nothing was switched off: could not read every listing from Fetch (' . $r['error'] . ').' );
 				break;
 			case 'needs_confirmation':
-				Fetch_WC_Logger::error( sprintf( 'Mirror paused: it would switch off %d of %d active Fetch products, more than half. Confirm with "Apply anyway" under WooCommerce → Fetch.', $r['off'], $r['active'] ) . ' (' . $counts . ')' );
+				Fetch_WC_Logger::error( $label . sprintf( 'Mirror paused: it would switch off %d of %d active Fetch products, more than half. Confirm with "Apply anyway" under WooCommerce → Fetch.', $r['off'], $r['active'] ) . ' (' . $counts . ')' );
 				break;
 			case 'apply_failed':
-				Fetch_WC_Logger::error( 'Mirror stopped early (' . $r['error'] . '): ' . $counts . '.' );
+				Fetch_WC_Logger::error( $label . 'Mirror stopped early (' . $r['error'] . '): ' . $counts . '.' );
 				break;
 			default:
-				$message = 'Mirror finished: ' . $counts . '.';
+				$message = $label . 'Mirror finished: ' . $counts . '.';
 				$r['errors'] ? Fetch_WC_Logger::error( $message ) : Fetch_WC_Logger::info( $message );
 		}
 	}
 
 	/**
-	 * Refs this shop sells on Fetch: every row a full sync sends as active.
-	 * Translations are not synced, so their listings are not kept either.
+	 * Refs this shop sells in a store: every row a full sync sends to it as
+	 * active. Translations are not synced, and products outside the store's
+	 * category filter are not sent, so their listings are not kept either.
 	 *
 	 * @return array<string,true>
 	 */
-	public static function shop_refs() {
-		$keep = array();
-		$page = 1;
+	public static function shop_refs( $store_id = null ) {
+		$categories = Fetch_WC_Settings::store_categories( $store_id );
+		$keep       = array();
+		$page       = 1;
 		do {
 			$ids = Fetch_WC_Language::product_ids(
 				array(
@@ -121,7 +130,11 @@ class Fetch_WC_Mirror {
 				if ( ! Fetch_WC_Language::is_default( $id ) ) {
 					continue;
 				}
-				foreach ( Fetch_WC_Product_Mapper::active_refs( wc_get_product( $id ) ) as $ref ) {
+				$product = wc_get_product( $id );
+				if ( $categories && ( ! $product instanceof WC_Product || ! Fetch_WC_Product_Mapper::in_categories( $product, $categories ) ) ) {
+					continue;
+				}
+				foreach ( Fetch_WC_Product_Mapper::active_refs( $product ) as $ref ) {
 					$keep[ $ref ] = true;
 				}
 			}
@@ -322,9 +335,9 @@ class Fetch_WC_Mirror {
 		return '?';
 	}
 
-	/** @return array<string,mixed>|null The run waiting for "Apply anyway". */
-	public static function pending() {
-		$pending = get_option( self::PENDING_OPTION, null );
+	/** @return array<string,mixed>|null A store's run waiting for "Apply anyway" (null: the primary store's). */
+	public static function pending( $store_id = null ) {
+		$pending = get_option( self::PENDING_OPTION . Fetch_WC_Settings::suffix( $store_id ), null );
 		return is_array( $pending ) && isset( $pending['off'] ) ? $pending : null;
 	}
 }

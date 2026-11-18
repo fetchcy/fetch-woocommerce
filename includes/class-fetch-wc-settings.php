@@ -1,6 +1,17 @@
 <?php
 /**
  * Plugin settings, stored as one option array.
+ *
+ * Credentials, server, brand attribute and the sync and import switches are
+ * global. Each connected Fetch store can set its own price markup, catalogue
+ * mode, category filter, auto-accept and preparation time; a store that sets
+ * none uses the global value.
+ *
+ * `store_id` is the "primary" store: the one connected first, and the only one
+ * before 1.4.0. It keeps the 1.3.0 option names, meta keys and job arguments;
+ * every other store gets its own, suffixed with its id (see suffix()). So an
+ * upgrade needs no migration, jobs queued by 1.3.0 still run, and a
+ * single-store shop's data stays exactly as it was.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -35,8 +46,13 @@ class Fetch_WC_Settings {
 			'prep_minutes'       => 15,
 			'webhook_secret'     => '',
 			'webhook_registered' => '',
+			// Connected stores, id => store config; null until 1.4.0 saves them,
+			// which means "the 1.3.0 store_id, with the global settings".
+			'stores'             => null,
 		);
 	}
+
+	const STATUS_OPTION = 'fetch_wc_store_status';
 
 	public static function all() {
 		$saved = get_option( self::OPTION, array() );
@@ -67,7 +83,149 @@ class Fetch_WC_Settings {
 	}
 
 	public static function is_connected() {
-		return '' !== self::get( 'client_id' ) && '' !== self::get( 'client_secret' ) && '' !== self::get( 'store_id' );
+		return '' !== self::get( 'client_id' ) && '' !== self::get( 'client_secret' ) && (bool) self::stores();
+	}
+
+	/** A store's own settings; blank values (and no categories) mean "use the global setting". */
+	public static function store_defaults() {
+		return array(
+			'id'             => '',
+			'name'           => '',
+			'price_markup'   => '',
+			'catalogue_mode' => '',
+			'categories'     => array(),
+			'auto_accept'    => '',
+			'prep_minutes'   => '',
+		);
+	}
+
+	/**
+	 * Every connected Fetch store, id => config, in the order they were connected.
+	 *
+	 * @return array<string,array<string,mixed>>
+	 */
+	public static function stores() {
+		$all = self::all();
+		if ( is_array( $all['stores'] ) ) {
+			$rows = $all['stores'];
+		} elseif ( '' !== (string) $all['store_id'] ) {
+			// 1.3.0: one store, with the global settings.
+			$rows = array(
+				array(
+					'id'   => (string) $all['store_id'],
+					'name' => (string) $all['store_name'],
+				),
+			);
+		} else {
+			$rows = array();
+		}
+		$out = array();
+		foreach ( $rows as $row ) {
+			if ( ! is_array( $row ) || ! isset( $row['id'] ) || '' === (string) $row['id'] ) {
+				continue;
+			}
+			$store               = array_merge( self::store_defaults(), array_intersect_key( $row, self::store_defaults() ) );
+			$store['id']         = (string) $store['id'];
+			$store['categories'] = array_values( array_unique( array_filter( array_map( 'intval', (array) $store['categories'] ) ) ) );
+			$out[ $store['id'] ] = $store;
+		}
+		return $out;
+	}
+
+	/** @return array<string,mixed>|null A connected store's config. */
+	public static function store( $store_id ) {
+		$stores = self::stores();
+		return isset( $stores[ (string) $store_id ] ) ? $stores[ (string) $store_id ] : null;
+	}
+
+	/** null means the primary store (what jobs and calls from before 1.4.0 meant). */
+	public static function resolve_store( $store_id ) {
+		return null === $store_id || '' === (string) $store_id ? (string) self::get( 'store_id' ) : (string) $store_id;
+	}
+
+	public static function is_primary( $store_id ) {
+		return self::resolve_store( $store_id ) === (string) self::get( 'store_id' );
+	}
+
+	/**
+	 * "" for the primary store, "_<id>" for any other: appended to the 1.3.0
+	 * option names and meta keys to give each store its own queue and results.
+	 */
+	public static function suffix( $store_id ) {
+		if ( self::is_primary( $store_id ) ) {
+			return '';
+		}
+		$id  = (string) $store_id;
+		$key = strtolower( preg_replace( '/[^A-Za-z0-9_-]/', '', $id ) );
+		return '_' . ( '' !== $key && strlen( $key ) <= 64 && strtolower( $id ) === $key ? $key : md5( $id ) );
+	}
+
+	/** Action Scheduler arguments for a store's job: the primary store's are 1.3.0's. */
+	public static function job_args( $store_id, array $args = array() ) {
+		return self::is_primary( $store_id ) ? $args : $args + array( 'store' => (string) $store_id );
+	}
+
+	public static function store_name( $store_id ) {
+		$store = self::store( self::resolve_store( $store_id ) );
+		if ( $store && '' !== $store['name'] ) {
+			return $store['name'];
+		}
+		return self::is_primary( $store_id ) && '' !== (string) self::get( 'store_name' ) ? (string) self::get( 'store_name' ) : self::resolve_store( $store_id );
+	}
+
+	/** "[Branch name] " in front of log lines when more than one store is connected. */
+	public static function label( $store_id ) {
+		return count( self::stores() ) > 1 ? '[' . self::store_name( $store_id ) . '] ' : '';
+	}
+
+	/** The markup this store's prices get: its own, else the global one. */
+	public static function store_markup( $store_id ) {
+		$store = self::store( self::resolve_store( $store_id ) );
+		return $store && '' !== (string) $store['price_markup'] ? self::sanitize_markup( $store['price_markup'] ) : self::markup();
+	}
+
+	public static function store_mirror( $store_id ) {
+		$store = self::store( self::resolve_store( $store_id ) );
+		return $store && '' !== (string) $store['catalogue_mode'] ? 'mirror' === self::sanitize_catalogue_mode( $store['catalogue_mode'] ) : self::mirror();
+	}
+
+	public static function store_auto_accept( $store_id ) {
+		$store = self::store( self::resolve_store( $store_id ) );
+		return $store && '' !== (string) $store['auto_accept'] ? 'yes' === $store['auto_accept'] : self::enabled( 'auto_accept' );
+	}
+
+	public static function store_prep_minutes( $store_id ) {
+		$store = self::store( self::resolve_store( $store_id ) );
+		$value = $store && '' !== (string) $store['prep_minutes'] ? $store['prep_minutes'] : self::get( 'prep_minutes' );
+		return max( 0, min( 180, (int) $value ) );
+	}
+
+	/** @return int[] The store's category filter (default-language term ids); empty means every product. */
+	public static function store_categories( $store_id ) {
+		$store = self::store( self::resolve_store( $store_id ) );
+		return $store ? $store['categories'] : array();
+	}
+
+	/**
+	 * Last full sync, last order and last error per store, for the settings page.
+	 *
+	 * @return array<string,mixed>
+	 */
+	public static function store_status( $store_id ) {
+		$all = get_option( self::STATUS_OPTION, array() );
+		$id  = self::resolve_store( $store_id );
+		return is_array( $all ) && isset( $all[ $id ] ) && is_array( $all[ $id ] ) ? $all[ $id ] : array();
+	}
+
+	public static function set_store_status( $store_id, array $values ) {
+		$all = get_option( self::STATUS_OPTION, array() );
+		$all = is_array( $all ) ? $all : array();
+		$id  = self::resolve_store( $store_id );
+		if ( '' === $id ) {
+			return;
+		}
+		$all[ $id ] = array_merge( isset( $all[ $id ] ) && is_array( $all[ $id ] ) ? $all[ $id ] : array(), $values );
+		update_option( self::STATUS_OPTION, $all, false );
 	}
 
 	/**
