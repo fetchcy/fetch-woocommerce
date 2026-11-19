@@ -293,6 +293,13 @@ See [tests/README.md](tests/README.md) for details.
 
 ## Changelog
 
+### 1.4.1
+
+- New: **Exclude backorder items** setting, on by default.
+  A product or variation WooCommerce would sell on backorder (status *On backorder*, or managed stock at 0 with backorders allowed) is sent to Fetch with stock 0 and is not added to Fetch while it is on backorder.
+  One already on Fetch stays listed at stock 0 and sells again when stock returns. Applies to every connected store.
+- Upgrading from 1.4.0 turns the setting on; nothing else changes.
+
 ### 1.4.0
 
 - New: **several Fetch stores from one site.**

@@ -39,6 +39,7 @@ function save_settings( array $fields ) {
 			'price_markup'    => (string) $s['price_markup'],
 			'catalogue_mode'  => $s['catalogue_mode'],
 			'brand_attribute' => $s['brand_attribute'],
+			'exclude_backorders' => isset( $s['exclude_backorders'] ) ? $s['exclude_backorders'] : 'yes', // Absent on 1.4.0.
 			'_wpnonce'        => wp_create_nonce( Fetch_WC_Admin::ACTION ),
 		),
 		$fields
@@ -162,6 +163,29 @@ function make_simple( $name, $sku, $price, $stock ) {
 	$p->set_stock_quantity( $stock );
 	$p->set_status( 'publish' );
 	return $p->save();
+}
+
+/** A dog product (sold in both stores) that may be on backorder. */
+function make_backorder_dog( $name, $sku, $stock, $backorders ) {
+	$p = new WC_Product_Simple();
+	$p->set_name( $name );
+	$p->set_sku( $sku );
+	$p->set_regular_price( '12' );
+	$p->set_manage_stock( true );
+	$p->set_stock_quantity( $stock );
+	$p->set_backorders( $backorders );
+	$p->set_category_ids( array( get_option( 'e2e_multi' )['dogs'] ) );
+	$p->set_status( 'publish' );
+	return $p->save();
+}
+
+function bo_meta( $id ) {
+	return array( get_post_meta( $id, '_fetch_product_id', true ), get_post_meta( $id, '_fetch_product_id_store-2', true ) );
+}
+
+function flush_both() {
+	Fetch_WC_Product_Sync::flush( 'store-1' );
+	Fetch_WC_Product_Sync::flush( 'store-2' );
 }
 
 function make_variable( $name, $sku, array $variation_skus ) {
@@ -880,6 +904,119 @@ switch ( $step ) {
 		$out['pending_2'] = array_keys( get_option( 'fetch_wc_pending_products_store-2', array() ) );
 		break;
 
+	// --- Exclude backorder items (1.4.1), run with both stores connected ----------------------
+	case 'bo_create':
+		$out['setting'] = Fetch_WC_Settings::exclude_backorders();
+		$out['new_id']  = make_backorder_dog( 'Backorder Newcomer', 'BO-NEW', 0, 'yes' );
+		$out['link_id'] = make_backorder_dog( 'Backorder Linked', 'BO-LINK', 5, 'yes' );
+		$out['pending'] = array_keys( get_option( 'fetch_wc_pending_products', array() ) );
+		flush_both();
+		$out['new_meta']  = bo_meta( $out['new_id'] );
+		$out['link_meta'] = bo_meta( $out['link_id'] );
+		break;
+
+	case 'bo_order':
+		// An order taking more than is left, as an order's stock reduction does.
+		$id = wc_get_product_id_by_sku( 'BO-LINK' );
+		wc_update_product_stock( $id, 7, 'decrease' );
+		$p = wc_get_product( $id );
+		$out['qty']    = $p->get_stock_quantity();
+		$out['status'] = $p->get_stock_status();
+		flush_both();
+		$out['meta']       = bo_meta( $id );
+		$out['sync_state'] = get_post_meta( $id, '_fetch_sync_status', true );
+		$out['new_meta']   = bo_meta( wc_get_product_id_by_sku( 'BO-NEW' ) );
+		break;
+
+	case 'bo_status_only':
+		// Unmanaged stock switched to "On backorder" by hand, on a product Fetch already has.
+		$id = make_backorder_dog( 'Backorder Status', 'BO-STAT', 3, 'no' );
+		flush_both();
+		$out['meta_before'] = bo_meta( $id );
+		$p = wc_get_product( $id );
+		$p->set_manage_stock( false );
+		$p->set_stock_status( 'onbackorder' );
+		$p->save();
+		flush_both();
+		$out['status'] = wc_get_product( $id )->get_stock_status();
+		break;
+
+	case 'bo_return':
+		$link = wc_get_product_id_by_sku( 'BO-LINK' );
+		$new  = wc_get_product_id_by_sku( 'BO-NEW' );
+		wc_update_product_stock( $link, 6 );
+		wc_update_product_stock( $new, 4 );
+		flush_both();
+		$out['link_meta'] = bo_meta( $link );
+		$out['new_meta']  = bo_meta( $new );
+		$out['link_status'] = wc_get_product( $link )->get_stock_status();
+		break;
+
+	case 'bo_var1':
+		$id = make_variable( 'BO Tee', 'BO-TEE', array( 'Red' => 'BO-TEE-R', 'Blue' => 'BO-TEE-B' ) );
+		foreach ( wc_get_product( $id )->get_children() as $child ) {
+			$v = wc_get_product( $child );
+			if ( 'BO-TEE-B' === $v->get_sku() ) {
+				$v->set_stock_quantity( 0 );
+				$v->set_backorders( 'notify' );
+				$v->save();
+			}
+		}
+		$out['id'] = $id;
+		Fetch_WC_Product_Sync::flush( 'store-1' );
+		$out['meta'] = array();
+		foreach ( wc_get_product( $id )->get_children() as $child ) {
+			$out['meta'][ wc_get_product( $child )->get_sku() ] = get_post_meta( $child, '_fetch_product_id', true );
+		}
+		break;
+
+	case 'bo_var2':
+		// The linked variation goes on backorder, the unlinked one gets stock back.
+		$id = wc_get_product_id_by_sku( 'BO-TEE' );
+		foreach ( wc_get_product( $id )->get_children() as $child ) {
+			$v = wc_get_product( $child );
+			if ( 'BO-TEE-R' === $v->get_sku() ) {
+				$v->set_stock_quantity( 0 );
+				$v->set_backorders( 'yes' );
+			} else {
+				$v->set_stock_quantity( 3 );
+			}
+			$v->save();
+		}
+		Fetch_WC_Product_Sync::flush( 'store-1' );
+		$out['meta'] = array();
+		foreach ( wc_get_product( $id )->get_children() as $child ) {
+			$out['meta'][ wc_get_product( $child )->get_sku() ] = get_post_meta( $child, '_fetch_product_id', true );
+		}
+		break;
+
+	case 'bo_full_sync':
+		// A full sync of every store with a new backorder product in the catalogue.
+		make_backorder_dog( 'Backorder Full', 'BO-FULL', 0, 'notify' );
+		run_bulk( 'store-1' );
+		run_bulk( 'store-2' );
+		$out['meta'] = bo_meta( wc_get_product_id_by_sku( 'BO-FULL' ) );
+		break;
+
+	case 'bo_setting_off':
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['notice']   = save_stores( array( array( 'id' => 'store-1', 'connect' => 'yes' ), array( 'id' => 'store-2', 'connect' => 'yes', 'price_markup' => '20', 'categories' => array( (string) get_option( 'e2e_multi' )['dogs'] ) ) ), array( 'exclude_backorders' => '' ) );
+		$out['setting']  = Fetch_WC_Settings::exclude_backorders();
+		$out['bulk']     = scheduled_args( Fetch_WC_Product_Sync::BULK_HOOK );
+		$out['checkbox'] = (bool) preg_match( '#name="exclude_backorders" value="yes"\s*>#', render_page() );
+		run_bulk( 'store-1' );
+		run_bulk( 'store-2' );
+		$out['full_meta'] = bo_meta( wc_get_product_id_by_sku( 'BO-FULL' ) );
+		break;
+
+	case 'bo_setting_on':
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['notice']   = save_stores( array( array( 'id' => 'store-1', 'connect' => 'yes' ), array( 'id' => 'store-2', 'connect' => 'yes', 'price_markup' => '20', 'categories' => array( (string) get_option( 'e2e_multi' )['dogs'] ) ) ), array( 'exclude_backorders' => 'yes' ) );
+		$out['setting']  = Fetch_WC_Settings::exclude_backorders();
+		$out['checkbox'] = (bool) preg_match( '#name="exclude_backorders" value="yes"\s*checked#', render_page() );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		break;
+
 	case 'multi_mirror':
 		// Store A (store-1) mirrors this shop; store B keeps the default, add and update only.
 		$rows = array(
@@ -927,6 +1064,8 @@ switch ( $step ) {
 	case 'version':
 		$out['version'] = FETCH_WC_VERSION;
 		$out['settings'] = Fetch_WC_Settings::all();
+		$raw             = get_option( Fetch_WC_Settings::OPTION, array() );
+		$out['raw_has_key'] = is_array( $raw ) && array_key_exists( 'exclude_backorders', $raw );
 		$out['pending']  = array_keys( get_option( Fetch_WC_Product_Sync::PENDING_OPTION, array() ) );
 		break;
 
@@ -970,6 +1109,50 @@ switch ( $step ) {
 		$out['orders'] = count( wc_get_orders( array( 'limit' => -1, 'meta_key' => '_fetch_order_id', 'meta_value' => 'ord-1' ) ) );
 		run_full_sync();
 		$out['log'] = recent_log( 5 );
+		break;
+
+	case 'upgrade_141':
+		// After 1.4.0 -> 1.4.1: the shop's existing product, then backorder cases.
+		$out['connected'] = Fetch_WC_Settings::is_connected();
+		$out['stores']    = array_map( function ( $s ) { return array( $s['name'], Fetch_WC_Settings::store_markup( $s['id'] ) ); }, Fetch_WC_Settings::stores() );
+		$id = wc_get_product_id_by_sku( 'CBL-001' );
+		wc_update_product_stock( $id, 3 );
+		// A product Fetch already has, then it goes on backorder.
+		$bo = new WC_Product_Simple();
+		$bo->set_name( 'Linked backorder' );
+		$bo->set_sku( 'CBL-001-BO' );
+		$bo->set_regular_price( '5' );
+		$bo->set_manage_stock( true );
+		$bo->set_stock_quantity( 4 );
+		$bo->set_backorders( 'yes' );
+		$bo->set_status( 'publish' );
+		$bo_id = $bo->save();
+		Fetch_WC_Product_Sync::flush();
+		wc_update_product_stock( $bo_id, 4, 'decrease' );
+		// A new product that is already on backorder.
+		$nb = new WC_Product_Simple();
+		$nb->set_name( 'New backorder' );
+		$nb->set_sku( 'CBL-NEWBO' );
+		$nb->set_regular_price( '5' );
+		$nb->set_manage_stock( true );
+		$nb->set_stock_quantity( 0 );
+		$nb->set_backorders( 'notify' );
+		$nb->set_status( 'publish' );
+		$nb_id = $nb->save();
+		Fetch_WC_Product_Sync::flush();
+		$out['new_bo_pid'] = (string) get_post_meta( $nb_id, '_fetch_product_id', true );
+		$out['checkbox_ticked']  = (bool) preg_match( '#name="exclude_backorders" value="yes"\\s*checked#', render_page() );
+		as_unschedule_all_actions( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		$out['save_notice']      = save_stores( array( array( 'id' => 'store-1', 'connect' => 'yes' ) ) );
+		$out['after_save']       = Fetch_WC_Settings::exclude_backorders();
+		$out['bulk_after_save']  = as_has_scheduled_action( Fetch_WC_Product_Sync::BULK_HOOK, null, Fetch_WC_Product_Sync::GROUP );
+		break;
+
+	case 'upgrade_141_return':
+		$nb_id = wc_get_product_id_by_sku( 'CBL-NEWBO' );
+		wc_update_product_stock( $nb_id, 5 );
+		Fetch_WC_Product_Sync::flush();
+		$out['new_bo_pid_after'] = (string) get_post_meta( $nb_id, '_fetch_product_id', true );
 		break;
 
 	case 'render_box':

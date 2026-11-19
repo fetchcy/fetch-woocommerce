@@ -445,6 +445,54 @@ try {
   const mf = await step('multi_flush', { store: 'store-1' });
   ok('multi: store-1 catches up once Fetch answers (27.50)', lastTo(rowsTo('store-1', r0), 'DOG-KIB')?.price === '27.50' && mf.pending.length === 0, rowsTo('store-1', r0));
 
+  // --- 1.4.1: exclude backorder items, with both stores connected (store-2 sells Dogs only).
+  const both = (rows1, rows2, ref) => [lastTo(rows1, ref), lastTo(rows2, ref)];
+  r0 = reqs().length;
+  const bo1 = await step('bo_create');
+  const boRows1 = rowsTo('store-1', r0);
+  const boRows2 = rowsTo('store-2', r0);
+  ok('backorder: the setting is on by default', bo1.setting === true, bo1.setting);
+  ok('backorder: a new product on backorder (stock 0, backorders allowed) is not created on either store', !boRows1.some((x) => x.ref === 'BO-NEW') && !boRows2.some((x) => x.ref === 'BO-NEW') && bo1.new_meta.every((m) => !m) && !Object.values(await listingsIn('store-1')).some((l) => l.ref === 'BO-NEW') && !Object.values(await listingsIn('store-2')).some((l) => l.ref === 'BO-NEW') && bo1.pending.includes(bo1.new_id), { bo1, boRows1 });
+  ok('backorder: a normal product in the same batch is created on both stores with its stock', lastTo(boRows1, 'BO-LINK')?.stockCount === 5 && lastTo(boRows2, 'BO-LINK')?.stockCount === 5 && bo1.link_meta.every((m) => !!m), { bo1, rows: both(boRows1, boRows2, 'BO-LINK') });
+
+  r0 = reqs().length;
+  const bo2 = await step('bo_order');
+  const [boo1, boo2] = both(rowsTo('store-1', r0), rowsTo('store-2', r0), 'BO-LINK');
+  ok('backorder: an order takes it past zero (-2, On backorder): the linked listing is updated with stockCount 0 on every store, still active', bo2.qty === -2 && bo2.status === 'onbackorder' && boo1?.stockCount === 0 && boo2?.stockCount === 0 && boo1.isActive === true && boo2.isActive === true && bo2.sync_state === 'synced', { bo2, boo1, boo2 });
+  ok('backorder: the newcomer is still not created after that flush', bo2.new_meta.every((m) => !m) && !rowsTo('store-1', r0).some((x) => x.ref === 'BO-NEW'), bo2.new_meta);
+
+  r0 = reqs().length;
+  const bo3 = await step('bo_status_only');
+  const bosr = rowsTo('store-1', r0);
+  ok('backorder: a linked product switched to "On backorder" with unmanaged stock goes to stockCount 0 (not omitted)', bo3.status === 'onbackorder' && bo3.meta_before.every((m) => !!m) && lastTo(bosr, 'BO-STAT')?.stockCount === 0 && lastTo(rowsTo('store-2', r0), 'BO-STAT')?.stockCount === 0, { bo3, rows: bosr.filter((x) => x.ref === 'BO-STAT') });
+
+  r0 = reqs().length;
+  const bo4 = await step('bo_return');
+  const [bob1, bob2] = both(rowsTo('store-1', r0), rowsTo('store-2', r0), 'BO-LINK');
+  const [bon1, bon2] = both(rowsTo('store-1', r0), rowsTo('store-2', r0), 'BO-NEW');
+  ok('backorder: stock returns (6): the linked listing is back to stockCount 6 on both stores', bo4.link_status === 'instock' && bob1?.stockCount === 6 && bob2?.stockCount === 6, { bo4, bob1, bob2 });
+  ok('backorder: the newcomer gets stock (4): now created on both stores, normal sync', bon1?.stockCount === 4 && bon2?.stockCount === 4 && bo4.new_meta.every((m) => !!m), { bo4, bon1, bon2 });
+
+  r0 = reqs().length;
+  const bov1 = await step('bo_var1');
+  const bovr = rowsTo('store-1', r0);
+  ok('backorder: variable product, create path: the in-stock variation is created, the backorder variation is not', lastTo(bovr, 'BO-TEE-R')?.stockCount === 5 && !bovr.some((x) => x.ref === 'BO-TEE-B') && !!bov1.meta['BO-TEE-R'] && !bov1.meta['BO-TEE-B'], { bov1, bovr });
+  r0 = reqs().length;
+  const bov2 = await step('bo_var2');
+  const bovr2 = rowsTo('store-1', r0);
+  ok('backorder: variations: the linked one on backorder is sent at 0, the unlinked one with stock back (3) is created', lastTo(bovr2, 'BO-TEE-R')?.stockCount === 0 && lastTo(bovr2, 'BO-TEE-R')?.isActive === true && lastTo(bovr2, 'BO-TEE-B')?.stockCount === 3 && !!bov2.meta['BO-TEE-B'], { bov2, bovr2 });
+
+  r0 = reqs().length;
+  const bobf = await step('bo_full_sync');
+  ok('backorder: a full sync of every store skips a new backorder product but still sends the linked ones at their stock', !rowsTo('store-1', r0).some((x) => x.ref === 'BO-FULL') && !rowsTo('store-2', r0).some((x) => x.ref === 'BO-FULL') && bobf.meta.every((m) => !m) && lastTo(rowsTo('store-1', r0), 'BO-LINK')?.stockCount === 6 && lastTo(rowsTo('store-2', r0), 'BO-LINK')?.stockCount === 6, { bobf, refs: [...new Set(rowsTo('store-1', r0).map((x) => x.ref))] });
+
+  r0 = reqs().length;
+  const booff = await step('bo_setting_off');
+  ok('backorder: untick the setting: all stores resend, and the backorder product is now created (stock 0)', booff.setting === false && booff.checkbox === true && JSON.stringify(booff.bulk.map((a) => a.store || 'store-1').sort()) === '["store-1","store-2"]' && booff.full_meta.every((m) => !!m) && lastTo(rowsTo('store-1', r0), 'BO-FULL')?.stockCount === 0, booff);
+  const boon = await step('bo_setting_on');
+  ok('backorder: tick it again: the box shows ticked and the catalogue is resent', boon.setting === true && boon.checkbox === true && /resent|being sent/.test(boon.notice || ''), boon);
+  ok('backorder: requests pass the live rules', mockLog().problems.length === 0, mockLog().problems);
+
   // Mirror on store A (store-1) only.
   await seedListings([{ listingId: 'a-only', ref: 'A-ONLY', name: 'Store A extra', price: '3.00' }]);
   await fetch(`${MOCK}/__seed-listings`, { method: 'POST', body: JSON.stringify({ store: 'store-2', listings: [{ listingId: 'b-only', ref: 'B-ONLY', name: 'Store B extra', price: '3.00' }] }) });

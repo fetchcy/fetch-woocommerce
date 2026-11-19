@@ -171,6 +171,8 @@ class Fetch_WC_Admin {
 								}
 								?>
 							</p>
+							<p><label><input type="checkbox" name="exclude_backorders" value="yes" <?php checked( Fetch_WC_Settings::exclude_backorders() ); ?>> <?php esc_html_e( 'Exclude backorder items', 'fetch-for-woocommerce' ); ?></label></p>
+							<p class="description"><?php esc_html_e( 'Products and variations WooCommerce would sell on backorder are shown as out of stock on Fetch (stock 0) and are not added to Fetch while on backorder. One already on Fetch stays listed, at stock 0, and sells again when stock returns. Applies to every connected store.', 'fetch-for-woocommerce' ); ?></p>
 							<p><button type="submit" class="button" name="do" value="bulk_sync" <?php disabled( ! Fetch_WC_Settings::is_connected() ); ?>><?php esc_html_e( 'Sync all products now', 'fetch-for-woocommerce' ); ?></button></p>
 						</td>
 					</tr>
@@ -572,6 +574,7 @@ class Fetch_WC_Admin {
 				$messages = array(
 					''       => __( 'Settings saved.', 'fetch-for-woocommerce' ),
 					'markup' => __( 'Settings saved. The price markup changed, so all products are being resent to Fetch.', 'fetch-for-woocommerce' ),
+					'backorders' => __( 'Settings saved. The backorder setting changed, so all products are being resent to Fetch.', 'fetch-for-woocommerce' ),
 					'brand'  => __( 'Settings saved. The brand attribute changed, so all products are being resent to Fetch.', 'fetch-for-woocommerce' ),
 					'stores' => __( 'Settings saved. Products are being sent to the Fetch stores you connected or changed.', 'fetch-for-woocommerce' ),
 				);
@@ -603,6 +606,7 @@ class Fetch_WC_Admin {
 			'custom_base_url' => esc_url_raw( $get( 'custom_base_url' ) ),
 			'client_id'       => $get( 'client_id' ),
 			'sync_products'   => 'yes' === $get( 'sync_products' ) ? 'yes' : 'no',
+			'exclude_backorders' => 'yes' === $get( 'exclude_backorders' ) ? 'yes' : 'no',
 			'import_orders'   => 'yes' === $get( 'import_orders' ) ? 'yes' : 'no',
 			'auto_accept'     => 'yes' === $get( 'auto_accept' ) ? 'yes' : 'no',
 			'prep_minutes'    => max( 0, min( 180, (int) $get( 'prep_minutes' ) ) ),
@@ -714,6 +718,11 @@ class Fetch_WC_Admin {
 			Fetch_WC_Logger::info( sprintf( 'Brand attribute changed from %s to %s; resending all products.', '' === $old_brand ? 'Automatic' : $old_brand, '' === $new['brand_attribute'] ? 'Automatic' : $new['brand_attribute'] ) );
 			$resync = null; // Every store.
 			$reason = 'markup' === $reason ? $reason : 'brand';
+		}
+		if ( $new['exclude_backorders'] !== ( 'no' === $old['exclude_backorders'] ? 'no' : 'yes' ) ) {
+			Fetch_WC_Logger::info( 'Exclude backorder items turned ' . ( 'yes' === $new['exclude_backorders'] ? 'on' : 'off' ) . '; resending all products.' );
+			$resync = null; // Every store.
+			$reason = $reason ? $reason : 'backorders';
 		}
 		if ( array() === $resync ) {
 			return '';
